@@ -105,6 +105,12 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python -m pytest -q tests
 
 现有 5 项合成测试覆盖大小端交错 PLY、属性与点顺序保持、截断文件拒绝、已知几何的法向符号与欧氏距离、已知刚体变换恢复。它们验证软件数值行为，不证明真实设备精度。Git 历史从当前开源基线开始，先前未提交的开发过程没有虚构历史。
 
+## 开发与版本管理
+
+修改和执行项目请遵循独立的 [代码修改与项目执行守则](PROJECT_RULES.md)。
+根目录 [AGENTS.md](AGENTS.md) 为后续编程助手提供持续入口。
+每个有意义的修改版本都需要验证、提交并同步；版本摘要见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 方法来源与许可证
 
 - [KISS-Matcher 官方仓库](https://github.com/MIT-SPARK/KISS-Matcher)
