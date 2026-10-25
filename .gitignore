@@ -1,0 +1,44 @@
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+
+# Private inputs, generated measurements, and machine-specific configuration
+/data/*
+!/data/README.md
+/output/
+/config.json
+/config.local.json
+/CAD_Scan_Registration_and_Deviation_Analysis_Plan.md
+*.stp
+*.step
+*.stl
+*.ply
+*.pcd
+*.las
+*.laz
+*.npy
+*.npz
+*.log
+
+# Credentials and local agent state must never be published
+.env
+.env.*
+*.pem
+*.key
+.git-credentials
+.aws/
+.codex/
+.agents/
