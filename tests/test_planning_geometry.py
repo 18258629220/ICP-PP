@@ -55,3 +55,17 @@ def test_m7_sign_and_physical_gate_remain_distinct():
     assert numerical_sign_check()['passed']
     assert not physical_gate(False, False, None)['passed']
     assert len(physical_gate(False, False, None)['pending']) == 3
+
+
+def test_packed_triangle_mesh_reader_rejects_bad_payload(tmp_path):
+    from planning.geometry import TriangleFile
+    path=tmp_path/'mesh.ply'
+    header=b'ply\nformat binary_little_endian 1.0\nelement vertex 3\nproperty double x\nproperty double y\nproperty double z\nelement face 1\nproperty list uchar uint vertex_indices\nend_header\n'
+    points=np.array([[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]],dtype='<f8')
+    face=np.zeros(1,dtype=[('count','u1'),('indices','<u4',(3,))]);face['count']=3;face['indices']=[0,1,2]
+    data=header+points.tobytes()+face.tobytes();path.write_bytes(data)
+    mesh=TriangleFile(path)
+    np.testing.assert_allclose(mesh.triangles([0])[0],points)
+    path.write_bytes(data[:-1])
+    with pytest.raises(ValueError,match='payload'):
+        TriangleFile(path)

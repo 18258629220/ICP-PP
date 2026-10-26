@@ -13,3 +13,4 @@
 
 - 新增 M7 符号/量值检查、原始 STEP 曲面距离抽查及独立的物理验证状态。
 - 引入 OpenCAMLib、Shapely 和几何测试，为可复现的 M8 离线路径作准备。
+- 新增 M8 局部凸起候选分区、工具接触路径、抬刀转场、CSV 与离线可视化；保持 execution_allowed=False。
