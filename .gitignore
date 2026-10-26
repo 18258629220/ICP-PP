@@ -42,3 +42,8 @@ dist/
 .aws/
 .codex/
 .agents/
+
+# Private planning settings and native crash dumps
+/planning.local.json
+core
+core.*
