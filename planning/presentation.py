@@ -56,12 +56,13 @@ def write_deliverables(out, run_dir, classified, poses, strokes, manifest):
         for index, points in enumerate(paths):
             ax.plot(points[:,i],points[:,j],lw=.8,c='#2166ac',label='Ball-center contact path' if index==0 else None)
         ax.set(title=name,xlabel='XYZ'[i]+' (mm)',ylabel='XYZ'[j]+' (mm)')
-        ax.set_aspect('equal',adjustable='datalim');ax.grid(alpha=.2)
+        ax.set_xlim(cad[:,i].min()-8,cad[:,i].max()+8);ax.set_ylim(cad[:,j].min()-8,cad[:,j].max()+8)
+        ax.set_aspect('equal',adjustable='box');ax.grid(alpha=.2)
     axes[0].legend(fontsize=8)
     fig2.suptitle('M8 offline geometry preview — provisional tool and material side; no robot execution',fontsize=13)
     fig2.savefig(dest/'toolpath_overview.png',dpi=160);plt.close(fig2)
     # Show the four largest regions with accepted paths; avoid a misleading dense global view.
-    region_ids = list(dict.fromkeys(s['region_id'] for s in strokes))[:4]
+    region_ids = sorted(set(s['region_id'] for s in strokes))[:4]
     fig3,axes=plt.subplots(2,2,figsize=(12,10),layout='constrained')
     for ax,rid in zip(axes.flat,region_ids):
         region=classified[classified.region_id==rid]
@@ -69,7 +70,10 @@ def write_deliverables(out, run_dir, classified, poses, strokes, manifest):
         for s in strokes:
             if s['region_id']==rid:
                 ax.plot(s['center'][:,0],s['center'][:,1],c='#2166ac',lw=1)
-        ax.set(title=f'Region {rid}: XY path detail',xlabel='X (mm)',ylabel='Y (mm)');ax.set_aspect('equal');ax.grid(alpha=.2)
+        center=region[['cad_closest_x_mm','cad_closest_y_mm']].median().to_numpy()
+        ax.set(title=f'Region {rid}: 20 mm XY window',xlabel='X (mm)',ylabel='Y (mm)',
+               xlim=(center[0]-10,center[0]+10),ylim=(center[1]-10,center[1]+10))
+        ax.set_aspect('equal');ax.grid(alpha=.2)
     for ax in list(axes.flat)[len(region_ids):]:ax.set_visible(False)
     fig3.suptitle('Candidate-region paths — orange: local protrusion; blue: ball center')
     fig3.savefig(dest/'toolpath_details.png',dpi=160);plt.close(fig3)
@@ -96,11 +100,12 @@ M7 数值检查通过；实际材料侧、独立配准精度和正式工艺余�
 
 1. 保留每个分析点及其分类原因，排除不可靠对应、其他接近方向、宽区域偏移和孤立点。
 2. 在三维空间按距离与法向连续性分区；投影区域由局部支持范围构造，保留孔洞与不连续区。
-3. 用 Shapely 裁剪往复线，用 OpenCAMLib BallCutter 对原 CAD 三角面做 drop-cutter，求出球头接触位置与球心轨迹。
+3. 沿每区主方向排列并用 Shapely 裁剪往复线，用 OpenCAMLib BallCutter 对原 CAD 三角面做 drop-cutter，求出球头接触位置与球心轨迹。
 4. 检查接触仍对应原候选区域；在每个采样点和相邻中点检查球体到 CAD 的间隙，拒绝不连续高度和不满足条件的线段。
 5. 各接触段之间先沿工具外侧抬起，再在高于全部 CAD（沿假设接近方向）的平面转场。顺序采用最近端点启发式，可反向，并非全局最优。
 
 这不是完整连续碰撞证明；没有校验实际磨头杆、主轴、夹具、机器人、动态误差或原始毛刺实体。转场平面仅相对于 CAD 几何有间隙。
+离散采样和直线插补中点采用 {cfg['geometry_tolerance_mm']} mm 的几何容差；允许的微小穿入也可能来自曲面弦线近似，不能全部解释为浮点误差。加工前需按正式工具与允许误差进一步加密、验证连续路径。
 
 ## 文件与字段
 
@@ -109,6 +114,8 @@ M7 数值检查通过；实际材料侧、独立配准精度和正式工艺余�
 - `target_pose.csv`：路径顺序、球心 XYZ、四元数 XYZW、接触点、法向、区域/段编号及阶段。
 - `candidate_regions.csv`：完整分析点、候选标签、区域、局部突出量与不采用原因。`analysis_row` 对应原 `deviation_points.csv` 行，不是原始 660 万点的行号。
 - `region_planning.json` / `path_manifest.json`：每区接受/拒绝数量、参数、代码版本和输入哈希。
+- `candidate_path_coverage.csv`：每个保留候选点到接触路径采样点的距离，明确保留尚未覆盖的候选。
+- `artifact_checks.json`：有限坐标、四元数、步长、球心/接触位置一致性及禁止执行标记的检查。
 - `../m7/validation.json` / `mesh_vs_step.csv`：M7 数值与原始 STEP 对照结果。
 
 TCP 在这里定义为球心，不是机器人法兰；工具 +Z 指向工件。路径落在名义 CAD 接触包络上，未推导实际多道次去除过程。

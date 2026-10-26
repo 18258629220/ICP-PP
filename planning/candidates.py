@@ -67,6 +67,8 @@ def classify(frame, cfg):
     result['local_baseline_mm'] = baseline
     result['local_excess_mm'] = excess
     result['candidate_mask'] = candidate
+    # No physical process acceptance exists; a candidate is not an authorized removal.
+    result['removal_mask'] = False
     result['region_id'] = labels
     result['classification'] = reasons
     result['material_sign_confirmed'] = cfg['material_side_confirmed']

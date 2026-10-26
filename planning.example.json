@@ -5,9 +5,12 @@
   "local_radius_mm": 5.0,
   "normal_neighbor_cosine": 0.85,
   "cluster_eps_mm": 2.2,
-  "cluster_min_points": 5,
   "region_min_points": 8,
-  "approach_outward_C": [0.0, 0.0, -1.0],
+  "approach_outward_C": [
+    0.0,
+    0.0,
+    -1.0
+  ],
   "minimum_normal_alignment": 0.5,
   "support_radius_mm": 1.25,
   "contact_support_tolerance_mm": 1.5,

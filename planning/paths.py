@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 from shapely import points as shapely_points, buffer, union_all
-from shapely.geometry import Point
-from .geometry import TriangleFile, ocl_frame, tool_frame, quaternion_xyzw, ball_drop, raster_lines, split_valid
+from shapely.geometry import Point, LineString
+from .geometry import TriangleFile, ocl_frame, tool_frame, quaternion_xyzw, ball_drop, aligned_raster_lines, split_valid
 from .candidates import classify
 from .validation import source_manifest
 from pipeline_common import dump_json, sha256
@@ -32,7 +32,7 @@ def validate_config(cfg):
 def project_region(region, mesh, aabb, frame, zmin, cfg):
     surface_points = region[['cad_closest_x_mm', 'cad_closest_y_mm', 'cad_closest_z_mm']].to_numpy()@frame
     polygon = union_all(buffer(shapely_points(surface_points[:, :2]), cfg['support_radius_mm'], quad_segs=4))
-    strokes_xy = raster_lines(polygon, cfg['raster_spacing_mm'], cfg['path_sampling_mm'])
+    strokes_xy, raster_angle = aligned_raster_lines(polygon, surface_points[:, :2], cfg['raster_spacing_mm'], cfg['path_sampling_mm'])
     if not strokes_xy:
         return [], {'reason': 'no_raster_intersection', 'input_points': len(region)}
     r = cfg['tool_ball_diameter_mm']/2
@@ -45,7 +45,8 @@ def project_region(region, mesh, aabb, frame, zmin, cfg):
     radial = center-contact
     radial_length = np.linalg.norm(radial, axis=1)
     normal = radial/np.maximum(radial_length[:, None], 1e-12)
-    support_distance, support_index = cKDTree(surface_points).query(contact, workers=2)
+    support_tree = cKDTree(surface_points)
+    support_distance, support_index = support_tree.query(contact, workers=2)
     contact_in_patch = np.array([polygon.covers(Point(float(p[0]), float(p[1]))) for p in contact])
     original_normals = region[['normal_x', 'normal_y', 'normal_z']].to_numpy()@frame
     normal_agreement = np.einsum('ij,ij->i', normal, original_normals[support_index])
@@ -65,6 +66,7 @@ def project_region(region, mesh, aabb, frame, zmin, cfg):
     valid &= clearance >= -cfg['geometry_tolerance_mm']
     result, offset = [], 0
     accepted_sample_count = 0
+    min_midpoint_clearance = np.inf
     min_clearance = np.inf
     for line in strokes_xy:
         count = len(line)
@@ -75,6 +77,13 @@ def project_region(region, mesh, aabb, frame, zmin, cfg):
             midpoint = (c[1:]+c[:-1])/2
             mc = scene.compute_distance(o3d.core.Tensor(midpoint.astype(np.float32)), nthreads=2).numpy()-r
             v[1:] &= mc >= -cfg['geometry_tolerance_mm']
+            cc = contact[offset:offset+count]
+            # Tool-center clipping alone does not guarantee the shifted contact curve
+            # stays in supported material. Check each contact edge as well.
+            supported_edges = np.array([polygon.buffer(1e-7).covers(LineString([a[:2], b[:2]]))
+                                        for a, b in zip(cc[:-1], cc[1:])])
+            midpoint_support = support_tree.query((cc[1:]+cc[:-1])/2, workers=2)[0]
+            v[1:] &= supported_edges & (midpoint_support <= cfg['contact_support_tolerance_mm'])
         for ids in split_valid(c, v, cfg['max_contact_jump_mm']):
             if np.linalg.norm(np.diff(c[ids], axis=0), axis=1).sum() < cfg['minimum_stroke_length_mm']:
                 continue
@@ -85,12 +94,16 @@ def project_region(region, mesh, aabb, frame, zmin, cfg):
                            'support_distance': support_distance[g], 'clearance': clearance[g]})
             accepted_sample_count += len(ids)
             min_clearance = min(min_clearance, float(clearance[g].min()))
+            min_midpoint_clearance = min(min_midpoint_clearance, float(mc[ids[:-1]].min()))
         offset += count
     return result, {'input_points': len(region), 'cad_triangles_in_crop': len(triangles),
                     'projected_samples': len(xy), 'valid_samples_before_min_length': int(valid.sum()),
                     'accepted_waypoints': accepted_sample_count, 'strokes': len(result),
+                    'raster_angle_in_tool_plane_deg': raster_angle,
                     'min_sample_sphere_clearance_mm': min_clearance if np.isfinite(min_clearance) else None,
-                    'negative_clearance_is_mesh_numeric_tolerance': True}
+                    'min_midpoint_sphere_clearance_mm': min_midpoint_clearance if np.isfinite(min_midpoint_clearance) else None,
+                    'accepted_penetration_tolerance_mm': cfg['geometry_tolerance_mm'],
+                    'clearance_note': 'Negative midpoint values include chord approximation, not only float roundoff'}
 
 
 def order_strokes(strokes):
@@ -173,6 +186,8 @@ def run_m8(root, cfg, pcfg, run_dir):
     if not m7['numerical_passed']:
         raise ValueError('M7 numerical checks failed')
     out = root/cfg['output_dir']
+    if sha256(root/cfg['step_path']) != m7['step_sha256']:
+        raise ValueError('STEP input changed after M7')
     for name, expected in m7['input_sha256'].items():
         if sha256(out/name) != expected:
             raise ValueError(f'Input changed after M7: {name}')
@@ -203,11 +218,17 @@ def run_m8(root, cfg, pcfg, run_dir):
         raise RuntimeError('No supported, reachable-from-assumed-side contact strokes survived; do not fabricate a path')
     clearance_height = zmax + pcfg['tool_ball_diameter_mm']/2 + pcfg['clearance_mm']
     poses = export_poses(ordered, frame, clearance_height, pcfg)
+    checks = validate_exported_poses(poses, pcfg)
+    dump_json(dest/'artifact_checks.json', checks)
     poses.to_csv(dest/'target_pose.csv', index=False)
     contacts = poses[poses.phase == 'nominal_contact']
     contact_length = sum(float(np.linalg.norm(np.diff(s['center'], axis=0), axis=1).sum()) for s in ordered)
     candidate_points = classified.loc[classified.region_id >= 0, ['cad_closest_x_mm', 'cad_closest_y_mm', 'cad_closest_z_mm']].to_numpy()
     distance = cKDTree(contacts[['contact_x_mm', 'contact_y_mm', 'contact_z_mm']].to_numpy()).query(candidate_points, workers=2)[0]
+    coverage = classified.loc[classified.region_id >= 0, ['analysis_row', 'region_id']].copy()
+    coverage['nearest_contact_sample_mm'] = distance
+    coverage['within_1mm_of_contact_sample'] = distance <= 1
+    coverage.to_csv(dest/'candidate_path_coverage.csv', index=False)
     manifest = {'status': 'offline_geometry_preview', 'coordinate_frame': 'CAD', 'units': 'mm',
                 'tool_model': 'provisional fixed-axis spherical abrasive head; OpenCAMLib BallCutter',
                 'tcp_definition': 'sphere_center', 'tool_z_direction': 'toward surface, opposite approach_outward_C',
@@ -226,3 +247,25 @@ def run_m8(root, cfg, pcfg, run_dir):
                 'config': pcfg, 'regions': regions}
     dump_json(dest/'path_manifest.json', manifest)
     return classified, poses, ordered, manifest
+
+
+def validate_exported_poses(poses, cfg):
+    xyz = poses[['x_mm', 'y_mm', 'z_mm']].to_numpy()
+    quat = poses[['qx', 'qy', 'qz', 'qw']].to_numpy()
+    if not len(poses) or not np.isfinite(xyz).all() or not np.isfinite(quat).all():
+        raise ValueError('Non-finite or empty pose sequence')
+    if not np.allclose(np.linalg.norm(quat, axis=1), 1, atol=1e-9, rtol=0):
+        raise ValueError('Invalid unit quaternion')
+    max_step = float(np.linalg.norm(np.diff(xyz, axis=0), axis=1).max())
+    if max_step > cfg['max_contact_jump_mm']+1e-7:
+        raise ValueError('Exported waypoint jump exceeds configured limit')
+    contact = poses[poses.phase == 'nominal_contact']
+    r = cfg['tool_ball_diameter_mm']/2
+    offset = contact[['x_mm','y_mm','z_mm']].to_numpy()-contact[['contact_x_mm','contact_y_mm','contact_z_mm']].to_numpy()
+    max_radius_error = float(np.max(np.abs(np.linalg.norm(offset, axis=1)-r)))
+    if max_radius_error > cfg['geometry_tolerance_mm']:
+        raise ValueError('Tool center is inconsistent with the spherical contact')
+    if poses.execution_allowed.any() or not poses.removal_depth_mm.isna().all():
+        raise ValueError('Preview must not contain execution authorization or a removal-depth command')
+    return {'poses_finite': True, 'unit_quaternion': True, 'execution_disabled': True,
+            'max_step_mm': max_step, 'max_ball_radius_error_mm': max_radius_error}

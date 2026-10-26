@@ -4,6 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pytest
+pytest.importorskip("shapely")
+pytest.importorskip("opencamlib")
 from shapely.geometry import Polygon
 from planning.geometry import tool_frame, ocl_frame, ball_drop, raster_lines, split_valid
 from planning.validation import numerical_sign_check, physical_gate
@@ -69,3 +71,17 @@ def test_packed_triangle_mesh_reader_rejects_bad_payload(tmp_path):
     path.write_bytes(data[:-1])
     with pytest.raises(ValueError,match='payload'):
         TriangleFile(path)
+
+
+def test_principal_direction_avoids_fragmenting_long_narrow_patch():
+    from planning.geometry import aligned_raster_lines
+    from shapely.affinity import rotate
+    from shapely.geometry import LineString
+    polygon=rotate(Polygon([(-15,-1),(15,-1),(15,1),(-15,1)]),75,origin=(0,0))
+    xy=np.asarray(polygon.exterior.coords)[:-1]
+    baseline=raster_lines(polygon,.5,.25)
+    aligned,angle=aligned_raster_lines(polygon,xy,.5,.25)
+    assert len(aligned)<len(baseline)/3
+    assert angle==pytest.approx(75)
+    for points in aligned:
+        assert polygon.buffer(1e-9).covers(LineString(points))

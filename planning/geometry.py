@@ -148,3 +148,17 @@ def split_valid(points, valid, max_jump):
     if start is not None:
         result.append(np.arange(start, len(points)))
     return [ids for ids in result if len(ids) >= 2]
+
+
+def aligned_raster_lines(polygon, sample_xy, spacing, sample_step):
+    """Orient raster passes along the patch's principal direction to avoid short strokes."""
+    from shapely.affinity import affine_transform
+    centered = np.asarray(sample_xy)-np.mean(sample_xy, axis=0)
+    values, vectors = np.linalg.eigh(centered.T@centered)
+    major = vectors[:, -1] if values[-1] > 1e-12 else np.array([1., 0.])
+    if major[np.argmax(np.abs(major))] < 0:
+        major = -major
+    rotation = np.column_stack([major, [-major[1], major[0]]])
+    local = affine_transform(polygon, [rotation[0, 0], rotation[1, 0], rotation[0, 1], rotation[1, 1], 0, 0])
+    lines = [points@rotation.T for points in raster_lines(local, spacing, sample_step)]
+    return lines, float(np.degrees(np.arctan2(major[1], major[0])))
