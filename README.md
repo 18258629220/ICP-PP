@@ -111,6 +111,14 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python -m pytest -q tests
 接触路径和 CAD 坐标系位姿导出。安装与运行见 [M7–M8 说明](docs/M7_M8.md)。
 实际配准精度、材料外侧和工具仍需独立验证；输出是带明确假设的几何预览。
 
+## CAD 指定路径与刀轴位姿
+
+`08_generate_cad_guided.py` 在 STEP 精确曲面上生成参考路径及解析法向，
+利用扫描局部曲面做有界法向修正，导出 CAD/输入扫描坐标下的接触点、刀轴三轴、
+XYZW 四元数与齐次矩阵，附离线三维图和 PNG。支持自动代表性选路或指定面与
+控制点，不涉及机器人基座转换及 IK。运行和字段约定见
+[CAD 路径说明](docs/CAD_GUIDED_PATHS.md)。
+
 ## 开发与版本管理
 
 修改和执行项目请遵循独立的 [代码修改与项目执行守则](PROJECT_RULES.md)。
