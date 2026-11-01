@@ -320,7 +320,9 @@ def write_mapping_visuals(output_dir, mesh_path, scan_points_C, reference_paths,
     fig.savefig(output_dir/'path_mapping_detail.png', dpi=180, facecolor='white')
     plt.close(fig)
 
-    fig = plt.figure(figsize=(12, 8), layout='constrained')
+    # Reserve a header: projected 3D labels extend beyond the axes rectangle.
+    fig = plt.figure(figsize=(12, 9))
+    fig.subplots_adjust(left=.03, right=.88, bottom=.10, top=.76)
     ax = fig.add_subplot(111, projection='3d')
     if len(valid):
         from planning.scan_mapping import contact_frames
@@ -364,8 +366,8 @@ def write_mapping_visuals(output_dir, mesh_path, scan_points_C, reference_paths,
         _equal(ax, reference)
         ax.text(*center, 'No accepted scan mapping; no mapped tool axes', color=REJECTED_COLOR)
     _view(ax, normal)
-    ax.set_title(f'Full contact-frame poses along {representative_id}\n'
-                 'X: forward tangent; Y: right-handed cross axis; +Z: toward surface', pad=18)
+    fig.suptitle(f'Full contact-frame poses along {representative_id}\n'
+                 'X: forward tangent; Y: right-handed cross axis; +Z: toward surface', y=.975)
     triad_legend = [Line2D([0], [0], color='#c63a36', lw=2, label='Tool X: forward tangent'),
                     Line2D([0], [0], color='#16834d', lw=2, label='Tool Y'),
                     Line2D([0], [0], color=TOOL_COLOR, lw=2, label='Tool +Z: toward surface'),
