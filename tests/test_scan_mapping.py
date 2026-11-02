@@ -180,7 +180,7 @@ def test_contact_pose_rigid_transform_and_example_ball_center(cfg):
 
 @pytest.mark.parametrize('key,value', [('max_normal_offset_mm', 0), ('path_sampling_mm', np.nan),
                                       ('fit_degree', 3), ('min_support_points', 3),
-                                      ('secondary_layer_fraction', 1), ('normal_mode', 'scan')])
+                                      ('secondary_layer_fraction', 1), ('normal_mode', 'unknown')])
 def test_invalid_mapping_configuration_rejected(cfg, key, value):
     cfg[key] = value
     with pytest.raises(ValueError):
@@ -190,3 +190,124 @@ def test_invalid_mapping_configuration_rejected(cfg, key, value):
 def test_undefined_contact_tangent_rejected():
     with pytest.raises(ValueError, match='undefined tangent'):
         contact_frames(np.zeros((3, 3)), np.tile([0, 0, 1.], (3, 1)))
+
+
+
+def test_scan_normal_mode_couples_surface_position_and_axis(cfg):
+    cfg = dict(cfg, normal_mode='scan', fit_degree=2)
+    xy = grid(3., .12)
+    z = .15+.08*xy[:, 0]+.025*xy[:, 0]**2
+    xs = np.linspace(-.6, .6, 7)
+    paths = _reference(xs)
+    paths[0]['uv'] = np.column_stack([xs, np.zeros(len(xs))])
+    table = map_reference_paths(paths, np.column_stack([xy, z]), cfg)
+    assert table.valid.all()
+    np.testing.assert_allclose(table.mapped_z_mm, .15+.08*xs+.025*xs**2, atol=1e-9)
+    expected = np.column_stack([-(.08+.05*xs), np.zeros(len(xs)), np.ones(len(xs))])
+    expected /= np.linalg.norm(expected, axis=1)[:, None]
+    np.testing.assert_allclose(table[['normal_x', 'normal_y', 'normal_z']], expected, atol=1e-9)
+    np.testing.assert_allclose(table[['cad_normal_x', 'cad_normal_y', 'cad_normal_z']],
+                               np.tile([0, 0, 1.], (len(xs), 1)))
+    np.testing.assert_allclose(table.u, xs)
+    assert table.normal_source.eq('scan_local_surface_derivative').all()
+    cad, scan, TC, TS = export_contact_poses(table, np.eye(4), cfg)
+    np.testing.assert_allclose(TC[:, :3, 2], -expected, atol=1e-9)
+    assert validate_contact_poses(cad, scan, TC, TS, np.eye(4), cfg)['passed']
+
+
+def test_external_uncertainty_is_not_inferred_from_small_fit_residual(cfg):
+    xy = grid()
+    neighbors = np.column_stack([xy, np.full(len(xy), .1)])
+    missing = fit_local_surface(np.zeros(3), [0, 0, 1], neighbors,
+                                dict(cfg, max_position_uncertainty_mm=.2))
+    assert missing['status'] == 'uncertainty_unavailable'
+    assert not missing['uncertainty_complete']
+    assert np.isnan(missing['position_uncertainty_mm'])
+    measured = dict(cfg, scan_sigma_mm=.03, registration_sigma_mm=.04,
+                    uncertainty_multiplier=2., max_position_uncertainty_mm=.11)
+    fit = fit_local_surface(np.zeros(3), [0, 0, 1], neighbors, measured)
+    assert fit['valid'] and fit['uncertainty_complete']
+    assert fit['position_uncertainty_mm'] == pytest.approx(.1)
+    limited = fit_local_surface(np.zeros(3), [0, 0, 1], neighbors,
+                                dict(measured, max_position_uncertainty_mm=.09))
+    assert limited['status'] == 'position_uncertainty_limit'
+
+
+def test_face_filtered_support_excludes_parallel_other_face(cfg):
+    xy = grid(3., .15)
+    cloud = np.concatenate([np.column_stack([xy, np.full(len(xy), z)]) for z in [.1, -.5]])
+    labels = np.r_[np.zeros(len(xy), dtype=int), np.ones(len(xy), dtype=int)]
+    path = _reference(np.linspace(-.5, .5, 5))
+    unfiltered = map_reference_paths(path, cloud, cfg)
+    assert not unfiltered.valid.any()
+    table = map_reference_paths(path, cloud, cfg, support_face_ids=labels)
+    assert table.valid.all() and table.face_support_filtered.all()
+    np.testing.assert_allclose(table.mapped_z_mm, .1, atol=1e-10)
+    unknown = map_reference_paths(path, cloud, cfg, support_face_ids=np.full(len(cloud), -1))
+    assert not unknown.valid.any()
+    with pytest.raises(ValueError, match='support_face_ids'):
+        map_reference_paths(path, cloud, cfg, support_face_ids=labels[:-1])
+
+
+def test_empty_result_preserves_export_schema_and_explicit_empty_check(cfg):
+    table = map_reference_paths(_reference([0., .5]), np.array([[99., 99., 99.]]), cfg)
+    cad, scan, TC, TS = export_contact_poses(table, np.eye(4), cfg)
+    assert cad.empty and scan.empty
+    assert TC.shape == TS.shape == (0, 4, 4)
+    assert set(['x_mm', 'tool_z_x', 'qx', 'frame', 'execution_allowed']).issubset(cad.columns)
+    checks = validate_contact_poses(cad, scan, TC, TS, np.eye(4), cfg)
+    assert checks['passed'] and checks['empty'] and checks['accepted_pose_count'] == 0
+
+
+def test_pose_splits_and_rejected_samples_are_synchronized(cfg):
+    points = np.array([[0., 0., .1], [.5, 0., .1], [1., 0., .1],
+                       [1., .5, .1], [1., 1., .1], [1., 1.5, .1]])
+    table = pd.DataFrame(dict(path_id='corner', sample_index=np.arange(len(points)),
+                              valid=True, segment_id=0, status='accepted'))
+    for j, axis in enumerate('xyz'):
+        table[f'mapped_{axis}_mm'] = points[:, j]
+        table[f'cad_{axis}_mm'] = points[:, j]
+        table[f'normal_{axis}'] = float(j == 2)
+    cad, scan, TC, TS = export_contact_poses(table, np.eye(4), cfg)
+    assert len(cad) > 0
+    diagnostics = table[table.valid].reset_index(drop=True)
+    assert diagnostics[['path_id', 'sample_index', 'segment_id']].equals(
+        cad[['path_id', 'sample_index', 'segment_id']])
+    assert cad.segment_id.nunique() >= 2
+    assert validate_contact_poses(cad, scan, TC, TS, np.eye(4), cfg)['passed']
+    # Re-export is idempotent even after endpoint tangent recomputation.
+    cad2, _, TC2, _ = export_contact_poses(table, np.eye(4), cfg)
+    np.testing.assert_allclose(TC, TC2)
+    assert cad.sample_index.equals(cad2.sample_index)
+
+
+@pytest.mark.parametrize('key,value', [('scan_sigma_mm', -.1),
+                                      ('registration_sigma_mm', np.nan),
+                                      ('uncertainty_multiplier', 0.),
+                                      ('max_position_uncertainty_mm', -.1)])
+def test_invalid_conditional_uncertainty_configuration(cfg, key, value):
+    with pytest.raises(ValueError):
+        validate_mapping_config(dict(cfg, **{key: value}))
+
+
+def test_local_surface_derivatives_are_covariant_under_rigid_rotation(cfg):
+    xy = grid()
+    z = .12+.06*xy[:, 0]-.03*xy[:, 1]+.04*xy[:, 0]**2
+    points = np.column_stack([xy, z])
+    rotation = Rotation.from_euler('xyz', [.5, -.7, .9]).as_matrix()
+    translation = np.array([12., -20., 5.])
+    normal = rotation@np.array([0., 0., 1.])
+    fit = fit_local_surface(translation, normal, points@rotation.T+translation, cfg)
+    assert fit['valid']
+    expected_normal = np.array([-.06, .03, 1.])
+    expected_normal /= np.linalg.norm(expected_normal)
+    np.testing.assert_allclose(fit['mapped_point'], translation+.12*normal, atol=1e-10)
+    np.testing.assert_allclose([fit[f'scan_normal_{a}'] for a in 'xyz'],
+                               rotation@expected_normal, atol=1e-10)
+
+
+def test_path_correspondence_lengths_cannot_be_silently_truncated(cfg):
+    path = _reference([0., .5, 1.])
+    path[0]['normals_C'] = path[0]['normals_C'][:2]
+    with pytest.raises(ValueError, match='aligned finite arrays'):
+        map_reference_paths(path, np.array([[0., 0., .1]]), cfg)
