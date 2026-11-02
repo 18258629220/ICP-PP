@@ -17,6 +17,54 @@ class CadTopology:
     def from_step(cls, path, **kwargs):
         return cls(load_faces(path), **kwargs)
 
+    @classmethod
+    def from_cache(cls, step_path, cache_dir, linear_deflection_mm=None,
+                   angular_deflection_rad=None):
+        """Reload exact faces while reusing an input-hash-checked mesh catalog.
+
+        Cache files are local derived data. A matching STEP hash is mandatory;
+        imported face traversal and exact/mesh face counts must agree.
+        """
+        import json
+        from pathlib import Path
+        from OCP.BRep import BRep_Tool
+        from pipeline_common import sha256
+        folder = Path(cache_dir)
+        catalog = json.loads((folder/'face_topology.json').read_text())
+        expected = catalog.get('step_sha256')
+        if expected is None and (folder/'cache_manifest.json').exists():
+            manifest = json.loads((folder/'cache_manifest.json').read_text())
+            expected = manifest.get('step_sha256')
+        if expected is None or sha256(step_path) != expected:
+            raise ValueError('CAD cache STEP hash is absent or differs from input')
+        for key, value in [('mesh_linear_deflection_mm', linear_deflection_mm),
+                           ('mesh_angular_deflection_rad', angular_deflection_rad)]:
+            if value is not None and not np.isclose(catalog[key], value, rtol=0, atol=1e-12):
+                raise ValueError(f'CAD cache {key} differs from requested meshing')
+        result = cls.__new__(cls)
+        result.faces = load_faces(step_path)
+        if len(result.faces) != catalog['face_count']:
+            raise ValueError('CAD cache exact face count differs')
+        result.catalog = {**catalog, 'step_sha256': expected}
+        result.face_bounds = np.asarray([r['bounds_mm'] for r in catalog['faces']], float)
+        result.surfaces = [BRep_Tool.Surface_s(face.wrapped) for face in result.faces]
+        result.boundary_edges = [[edge for edge in face.Edges()
+                                 if not BRep_Tool.IsClosed_s(edge.wrapped, face.wrapped)]
+                                for face in result.faces]
+        with np.load(folder/'cad_face_mesh.npz', allow_pickle=False) as stored:
+            for key in ('vertices','vertex_uv','vertex_face_ids','triangles','triangle_face_ids'):
+                setattr(result, key, stored[key].copy())
+        if (result.vertices.ndim != 2 or result.vertices.shape[1] != 3 or
+                result.triangles.ndim != 2 or result.triangles.shape[1] != 3 or
+                len(result.triangles) != len(result.triangle_face_ids) or
+                len(result.vertices) != len(result.vertex_face_ids) or
+                result.vertex_uv.shape != (len(result.vertices),2)):
+            raise ValueError('CAD cache mesh provenance shapes differ')
+        if len(result.triangle_face_ids) and (result.triangle_face_ids.min() < 0 or
+                result.triangle_face_ids.max() >= len(result.faces)):
+            raise ValueError('CAD cache contains invalid triangle face IDs')
+        return result
+
     def __init__(self, faces, linear_deflection_mm=.05, angular_deflection_rad=.15):
         from OCP.BRep import BRep_Tool
         if (not np.isfinite(linear_deflection_mm) or linear_deflection_mm <= 0 or

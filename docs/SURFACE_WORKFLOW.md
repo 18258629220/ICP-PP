@@ -1,111 +1,98 @@
-# CAD 型面分割、覆盖路径与刀轴映射
+# 真实工件基坐标分割与随形接触规划
 
-本版本接续用户已有的 08 精确曲线映射，补齐前述方案第 1–5 步的几何工作流。
-第 6 步机器人基座/逆解/运动规划、第 7 步加工与复测闭环不在本次范围。
-输出始终 `execution_allowed=False`。长度均为 mm，变换仍为 `p_C=R@p_S+t`。
+原始扫描文件的 XYZ 已由用户确认为机械臂基坐标 `ROBOT_BASE`，单位 mm。
+本流程以该坐标系交付 CAD 定位结果、分割点云、接触路径和刀轴。
+确认坐标来源本身不会提高已有配准精度；不加入额外手眼变换或设备执行指令。
 
-## 与原实现的区别
+## 坐标与变换
 
-| 步骤 | 原实现 | 本次增加 | 仍需细化的边界 |
-|---|---|---|---|
-| CAD 结构 | 面面积与 UV 范围、整体 STL | 真正共享边邻接、孔洞、绝对离散、三角形面号和逐顶点 UV | 自动相切面合并、加工语义标签尚未实现 |
-| 型面分割 | 路径点自带指定面号 | 原始点逐点面归属、BVH 候选、精确曲面裁剪、竞争/边界拒绝 | 目前不做邻域标签优化；法向门槛为可选 API，CLI 不假定扫描法向已知 |
-| 实际型面 | 路径附近局部曲面 | 同面支持隔离、实际位置/导数法向/曲率、条件误差、覆盖采样场和加工区域 | 局部模型不保证全局 C1；尖毛刺与多值结构需单独处理 |
-| 路径 | 最多几条代表曲线 | 采样物理度量控制行距、精确孔洞裁剪、保护区、区域连接、常量深度层 | 尚无全局等残留高度/工具接触面积覆盖证明 |
-| 刀轴 | 只用 CAD 法向 | 可选择同一实际局部曲面的导数法向，保留两种法向，完整姿态连续分段 | 仍是接触框架/示例球心；实际盘式/砂带工具接触模型待提供 |
+记 `C` 为 CAD 设计坐标，`B` 为原始扫描所在的机械臂基坐标。
+原有配准保存 `p_C = R_CB @ p_B + t_CB`；兼容文件 `T_scan_to_CAD.npy`
+仍保留，明确等于 `T_BASE_to_CAD.npy`。定位到现场使用其逆矩阵：
 
-## 运行真实数据
+```text
+T_CAD_to_BASE = inverse(T_BASE_to_CAD)
+p_B = R_BC @ p_C + t_BC
+n_B = R_BC @ n_C
+R_B_contact = R_BC @ R_C_contact
+```
 
-先完成现有配准；本流程不重新拟合、不改变 `T_scan_to_CAD.npy`。
-校验原始 STEP/扫描哈希及保存的变换，输入改变时拒绝复用旧配准。
+位置旋转后加平移；法向、刀轴只旋转；四元数重新由基坐标姿态矩阵计算，顺序 XYZW。
+`T_B_contact` 的前三列是接触框架的 X/Y/Z，末列为接触点 XYZ。
+工具 +Z 指向表面，+X 沿路径切向，+Y 构成右手系。
+接触原点不是已标定 TCP、法兰位置或磨头球心。
+
+原始点云已经在 B 系，输出分割 PLY 时直接保留其 XYZ；不能再对这些点应用一次
+CAD 到 B 的变换。主 CSV、图、点云和 CAD 必须使用相同的基坐标约定。
+CAD 面号和 UV 仍描述设计曲面，不会因基坐标输出而重新编号或改成三角形编号。
+
+## 处理和运行
+
+1. 核对 STEP/扫描哈希、毫米单位、`scan_frame="ROBOT_BASE"` 和既有配准。
+2. 保存双向变换，将 CAD 定位到原始扫描基坐标，并核对数值往返。
+3. 内部使用 CAD 面/UV 进行全点分割、精确裁剪与局部扫描拟合。
+4. 在有观测支持的主要型面上生成覆盖路径，保留孔洞和缺测处的断开。
+5. 将接触点、参考点、法向、完整姿态一致转换为 B 系，生成主输出与基坐标三维图。
 
 ```bash
-cp surface_workflow.example.json surface_workflow.local.json
-# 根据实际几何与工艺编辑本机文件，优先指定 coverage.face_ids 控制覆盖范围。
 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
   09_plan_surface_workflow.py --config config.json \
   --surface-config surface_workflow.local.json \
-  --run-dir output/surface_workflow/my_new_run
+  --run-dir output/real_base_run
 ```
 
-运行目录必须为空。真实输入、配置、原始点标签、图像与路径结果均留在本地忽略目录。
-不要把真实面号/工艺方案写进公开示例配置。
+目录必须为空。真实输入、本机配置、图像与结果只保存在本地。
+已有矩阵经核对后直接复用逆变换，不为了改变表达坐标重新 ICP，也不缩放点云。
+局部拟合默认参数统一保存在 `surface_workflow.example.json.mapping`，由本机型面配置的
+`mapping` 覆盖；原有本机配置可保留其拟合参数。`coverage.path_sampling_mm` 统一控制路径采样。
+`coverage.face_ids` 可指定型面；自动选择记录面积、支持数量和排除原因，不代表生产区域批准。
+行距和采样间距是几何规划参数，当前不依赖磨头型号，也不声明实际接触面积全覆盖。
 
-`coverage.face_ids=null` 对每个扫描支持足够的面建立覆盖线；不是确认生产加工区。
-复杂模型可能超过路径样本上限，此时明确报错，保留已经写出的分割结果。
-应指定型面范围或调整采样，而不是静默截断。分割依然处理全部原始点；
-`segmentation_chunk_points` 限制每块诊断表规模，不能改变点序或跳过点。
+## 先看这些文件
 
-## 输出关联
-
-| 文件 | 含义 |
+| 文件 | 作用 |
 |---|---|
-| `face_topology.json` | 面/共享边/孔洞/邻接与导入遍历编号 |
-| `cad_face_mesh.npz` | 独立按面离散的顶点/三角形、triangle_face_ids、vertex_uv、vertex_face_ids |
-| `scan_face_labels.csv` | 与输入 PLY 逐行对应的 source_index、面标签、UV、投影、偏差、边界距离及拒绝原因 |
-| `face_labels.npy` | 全点 int32 面标签，拒绝点 -1，分块写入 |
-| `support_provenance.csv` | 拟合支持点到原始行号的来源；每面/体素保留真实点，不跨薄壁平均 |
-| `cad_coverage_reference.csv` | 所有参考路径样本及精确 CAD UV |
-| `coverage_sampling.json` | 每面线数、采样度量行距及非认证标记 |
-| `surface_field.csv` | 沿覆盖线采样的实际局部型面、法向、误差、保护/余量/未知及 region_id |
-| `layer_*/path_mapping_diagnostics.csv` | 每层全部样本与最终有效性；断点不会被连回 |
-| `layer_*/tool_axis_poses_CAD.csv` / `SCAN.csv` | 接触点、工具三轴、XYZW 四元数、示例球心 |
-| `layer_*/tool_axis_transforms.npz` | CAD/输入扫描坐标接触框架矩阵 |
-| `summary.json` / `manifest.json` | 统计、数值检查、输入与代码哈希、commit/dirty 状态及耗时 |
+| `REAL_WORKPIECE.html` | 基坐标真实扫描、CAD、型面颜色、接触路径和刀轴，可切换图层 |
+| `real_overview.png` / `contact_axes_detail.png` | 基坐标静态总览和局部姿态 |
+| `contact_poses_BASE.csv` | 接触点 XYZ、三轴、XYZW 四元数及 `frame=ROBOT_BASE` |
+| `contact_transforms_BASE.npz` | 与 CSV 一一对应的基坐标接触框架矩阵 |
+| `surface_field_BASE.csv` | 全部参考采样的映射结果、参考点、法向与拒绝原因；几何字段为基坐标 |
+| `cad_reference_BASE.csv` | 基坐标 CAD 参考点以及不变的 STEP 面号、UV |
+| `scan_segmented_BASE.ply` | 全分辨率分割标签；原始 XYZ、点序和标量属性保留 |
+| `CAD_in_BASE.ply` | 定位到机器人现场坐标的 CAD |
+| `T_CAD_to_BASE.*` / `T_BASE_to_CAD.*` | 双向定位矩阵 |
+| `registration_BASE.json` | 坐标来源、矩阵含义、软件数值检查 |
+| `FINAL_RESULT_zh.md` / `summary.json` | 处理数量、独立路径段与限制 |
 
-`surface_field.csv` 是覆盖线上的采样场，不是每个 UV 位置都有可信数据的连续全域曲面。
-`face_id=-1` 不等于没有缺陷；置信度只是几何诊断分数，未经概率标定。
-STEP 面号不能用作原有 clean mesh 的三角形索引；新 NPZ 自己保存对应关系。
-CAD UV 不等于 Open3D 的三角形重心坐标。
-个别有效精确面可能没有 OCCT 三角网格；目录会记录 `mesh_status=partial`、
-`mesh_warnings` 与未离散面号，精确面仍参与分割，后续面号不会重新编号。
-此时新离散网格不是完整几何包络，不能用作完整碰撞或覆盖证明。
-`run_state.json` 记录运行中、失败或完成；中断时 NPY 未处理行保持 -2，拒绝行是 -1。
+`segment_id` 改变即表示路径断开，不能跨孔洞、缺测或姿态跳变直接连接。
+所有位姿 `execution_allowed=False`；尚未包含机器人逆解、碰撞、进退刀和速度规划。
+内部 CAD 位姿仅在 `export_cad_audit=true` 时保存为 `contact_poses_CAD_audit.csv`，
+该审核文件不能与主 CSV 中的基坐标位置或方向混合使用。
 
-## 参数与工艺判定
+## 支撑数据和质量检查
 
-`mapping.normal_mode=scan` 用同一鲁棒局部高度曲面的导数生成刀轴；`cad` 保持旧模式。
-两者均保存 CAD/扫描法向。曲率通过第一/第二基本形式计算，包含非零坡度修正。
-缺测、多层、外推、噪声或姿态不连续会拒绝或拆段，邻域只允许已归属到同一 CAD 面的点。
+全分辨率分割采用带 CAD 面号来源的网格加速查询，距离、竞争、边界或未离散面附近
+会拒绝自动归属。`face_labels.npy` 和 `point_diagnostics.npy` 与原始行号一一对应；
+距离和 UV 等标量不会因坐标旋转改变。拒绝标签 -1，未处理标签 -2。
+默认不导出数 GB 的逐点 CSV。开启 `point_diagnostics_csv` 时，逐点投影 CSV 明确标记
+`frame=CAD_LOCAL` 和 `source_frame=ROBOT_BASE`，用于内部型面审核。
 
-`scan_sigma_mm`、`registration_sigma_mm` 是外部提供的沿 CAD 法向标准不确定度，
-与局部预测项按独立条件 RSS 合成。默认 null，不会从很小拟合残差推断精度。
-该预算没有姿态协方差、杆臂效应、相关误差和模型偏差，不能证明真实绝对精度。
+`exact_face_audit.csv/json` 将接受和拒绝样本与精确 STEP 投影对照；抽查一致性不等于
+全体标签的真实正确率。`face_topology.json` 保存面、共享边和孔洞来源；
+`cad_face_mesh_BASE.npz` 保存基坐标网格顶点、三角形面号与 CAD 曲面 UV。
+内部缓存中的网格与 `segmentation_support.npz` 支持点仍在 CAD 局部坐标；
+`mesh_status=partial` 时未离散面仍有明确记录。
 
-法向不确定度不等于切向边界误差。`process.boundary_position_bound_mm` 需独立提供
-边界空间误差上界；默认 null。边界保护裕度为配置接触半径、保护间隙、该上界及
-跟随误差上界之和。接触半径是工艺输入，与 `example_ball_radius_mm` 的示例球半径不同。
-该保护只是几何预览，尚无完整磨头/刀杆包络和接触变形证明。
+实际接触点和刀轴法向来自同一局部扫描曲面，保留设计与扫描法向诊断。
+邻域不跨已归属型面，支持不足、多层歧义、外推和姿态不连续会拒绝或拆段。
+CAD 工作区中的审核字段必须明确命名，不能与 `ROBOT_BASE` 主输出混用。
 
-只有外部法向误差、边界误差及 `material_side_confirmed=true` 明确时，偏差下界超过
-`allowance_threshold_mm` 且通过保护检查的样本才标成 allowance_candidate。
-否则保留 uncertain_metrology、material_side_unconfirmed、boundary_uncertainty_unknown
-等状态。禁止把字符串 "false" 当材料侧确认。
+缓存按 STEP/扫描哈希、网格参数与支持采样参数核对；坐标来源确认不会改变这些输入。
+运行验收检查 `run_state.json` 的 `status="completed"`、原始点属性/点序、双向矩阵、CSV/矩阵姿态一致性、
+CAD 与基坐标往返误差，以及路径没有跨缺口连接。
 
-`protected_uv_boxes` 可配置 `{face_id, bounds:[umin,umax,vmin,vmax]}`，
-保护区域覆盖余量判定。区域按同面、位置距离、法向一致性及精确 UV 裁剪可见性连接；
-小于 `minimum_region_samples` 的孤立区域保留诊断，不自动加工。
-区域拓扑精度受路径采样和连接半径限制，不能识别采样间未观测的小缺陷。
+外部扫描误差、配准误差与模型偏差没有独立测量时保持未知。
+当前交付只证明软件几何处理和坐标表达的一致性，不认证 ≤0.2 mm 实物绝对精度。
 
-`layer_depths_mm` 必须从 0 严格递增，0 层表示当前拟合基体。正层仅在 scan 法向模式
-及材料侧确认后生成沿实际法向的常量偏置，并要求偏差下界覆盖深度、边界增加深度裕度、
-局部 `depth*max_abs_principal_curvature<0.5`。这只是局部平行曲面正则性检查；
-未定义实际单次去除能力、力、进给和工具整体碰撞，不能直接用于设备。
-
-## 可复现合成验证
-
-无需真实输入，生成带孔板和圆柱，二次高度场、径向偏差及解析实际法向作为真值：
-
-```bash
-OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
-  scripts/create_synthetic_surface_case.py --output-dir output/synthetic_surface_case
-OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
-  09_plan_surface_workflow.py --config output/synthetic_surface_case/config.json \
-  --surface-config output/synthetic_surface_case/surface_config.json \
-  --run-dir output/synthetic_surface_plan
-OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python -m pytest -q tests
-```
-
-合成配置的 identity、材料方向、零扫描/配准误差和精确边界是已知人工真值，
-不能复制成实际设备标定参数。生成目录同样拒绝覆盖，全部数据仍在 ignored output。
-基础环境已包含所需依赖，不引入 ROS、机器人模型或新训练网络。
+当前仅保留全型面接触规划入口；旧球头去毛刺、代表性曲线入口及其专属依赖已移除。
+精确 STEP 面/UV 几何、全点标签和必要诊断继续保留，检查集中在坐标、属性和有效路径上。

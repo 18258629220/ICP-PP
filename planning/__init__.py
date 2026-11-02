@@ -1,1 +1,1 @@
-"""Offline CAD-frame validation and deburring path previews (no robot execution)."""
+"""CAD-guided surface geometry and robot-base contact planning; no device execution."""

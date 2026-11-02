@@ -1,5 +1,6 @@
 {
   "units": "mm",
+  "scan_frame": "ROBOT_BASE",
   "step_path": "data/model.step",
   "scan_path": "data/scan.ply",
   "output_dir": "output",

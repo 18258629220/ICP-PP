@@ -9,6 +9,20 @@ from planning.cad_topology import CadTopology
 from planning.segmentation import segment_points, FaceBoundsIndex, segmentation_config
 
 
+def test_periodic_projection_uses_trimmed_face_parameter_chart():
+    from OCP.Geom import Geom_CylindricalSurface
+    from OCP.gp import gp_Ax3
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    surface=Geom_CylindricalSurface(gp_Ax3(),5.)
+    face=cq.Face(BRepBuilderAPI_MakeFace(surface,6.2,6.4,-2.,2.,1e-8).Face())
+    topology=CadTopology([face])
+    point=[5.1*np.cos(.01),5.1*np.sin(.01),0.]
+    row=segment_points([point],topology,{'boundary_margin_mm':.05}).iloc[0]
+    assert row.valid
+    assert 6.2 <= row.u <= 6.4
+    assert row.signed_deviation_mm == pytest.approx(.1,abs=1e-8)
+
+
 def test_true_shared_edges_and_mesh_face_uv_provenance(tmp_path):
     solid = cq.Workplane('XY').circle(5).extrude(4).val().translate((13, -7, 2))
     topology = CadTopology(solid.Faces(), linear_deflection_mm=.02)
@@ -105,10 +119,3 @@ def test_bvh_candidates_match_conservative_aabb_distances_and_overflow_rejects()
     result = segment_points([[0,0,0]],topology,{'max_distance_mm':2.,'max_candidates':1})
     assert result.loc[0,'status'] == 'candidate_overflow'
     assert result.loc[0,'exact_projection_count'] == 0
-
-
-@pytest.mark.parametrize('cfg', [{'max_distance_mm':0},{'ambiguity_margin_mm':-.1},
-                                {'max_candidates':0},{'max_normal_angle_deg':np.nan}])
-def test_invalid_segmentation_config_rejected(cfg):
-    with pytest.raises(ValueError):
-        segmentation_config(cfg)

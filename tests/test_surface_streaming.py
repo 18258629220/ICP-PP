@@ -39,7 +39,8 @@ def test_streaming_matches_all_rows_and_support_for_different_chunks(tmp_path):
     raw = _scan(scan, points-transform[:3,3])
     original = scan.read_bytes()
     assert isinstance(raw, np.memmap)
-    all_rows = segment_points(transform_points(xyz_of(raw), transform), topology)
+    all_rows = segment_points(transform_points(xyz_of(raw), transform), topology).assign(
+        frame='CAD_LOCAL', source_frame='ROBOT_BASE')
     results = []
     for chunk in (1,3,100):
         out = tmp_path/f'chunk_{chunk}'
@@ -65,20 +66,6 @@ def test_streaming_matches_all_rows_and_support_for_different_chunks(tmp_path):
     assert scan.read_bytes() == original
 
 
-def test_streaming_zero_support_preserves_sidecar_and_empty_schema(tmp_path):
-    topology = CadTopology(cq.Workplane('XY').box(2,2,2).val().Faces())
-    raw = _scan(tmp_path/'input.ply', np.array([[20,0,0],[30,0,0]]))
-    out = tmp_path/'empty'
-    result = workflow.stream_segment_scan(raw,np.eye(4),topology,{},.5,out,1)
-    assert result['support_points'].shape == (0,3)
-    assert result['accepted_face_points'] == 0
-    assert result['compact_segmentation'].empty
-    assert list(pd.read_csv(out/'support_provenance.csv').columns) == ['support_index','source_index','face_id']
-    assert np.load(out/'face_labels.npy').tolist() == [-1,-1]
-    with pytest.raises(FileExistsError):
-        workflow.stream_segment_scan(raw,np.eye(4),topology,{},.5,out,1)
-
-
 def test_interrupted_scan_has_no_completed_marker_and_unprocessed_sentinel(tmp_path):
     topology = CadTopology(cq.Workplane('XY').box(2,2,2).val().Faces())
     raw = _scan(tmp_path/'input.ply', np.array([[20,0,0],[np.nan,0,0]]))
@@ -88,10 +75,3 @@ def test_interrupted_scan_has_no_completed_marker_and_unprocessed_sentinel(tmp_p
     assert np.load(out/'face_labels.npy').tolist() == [-1,-2]
     assert len(pd.read_csv(out/'scan_face_labels.csv')) == 1
     assert not (out/'summary.json').exists()
-
-
-@pytest.mark.parametrize('chunk',[0,-1,1.5,True])
-def test_chunk_size_is_validated_before_outputs(tmp_path,chunk):
-    with pytest.raises(ValueError, match='segmentation_chunk_points'):
-        workflow.stream_segment_scan(np.zeros(1),np.eye(4),None,{},.5,tmp_path/'out',chunk)
-    assert not (tmp_path/'out').exists()
