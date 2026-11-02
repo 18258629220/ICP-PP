@@ -1,4 +1,5 @@
 """Generate CAD-native curves, bounded scan projection, and contact-frame poses."""
+import pyexpat  # Resolve Python's expat before OCCT loads its shared libraries.
 import os
 os.environ.setdefault('OMP_NUM_THREADS', '4')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '4')
@@ -27,15 +28,15 @@ def summarize(table, poses, checks):
         'continuous_segments': int(poses.segment_id.nunique()),
         'supported_path_length_mm': sum(lengths), 'segment_lengths_mm': lengths,
         'status_counts': {str(k):int(v) for k,v in table.status.value_counts().items()},
-        'absolute_normal_offset_median_mm': float(np.median(np.abs(offsets))),
-        'absolute_normal_offset_p95_mm': float(np.percentile(np.abs(offsets),95)),
-        'absolute_normal_offset_max_mm': float(np.max(np.abs(offsets))),
-        'local_fit_rms_median_mm': float(valid.fit_rms_mm.median()),
+        'absolute_normal_offset_median_mm': float(np.median(np.abs(offsets))) if len(offsets) else None,
+        'absolute_normal_offset_p95_mm': float(np.percentile(np.abs(offsets),95)) if len(offsets) else None,
+        'absolute_normal_offset_max_mm': float(np.max(np.abs(offsets))) if len(offsets) else None,
+        'local_fit_rms_median_mm': float(valid.fit_rms_mm.median()) if len(valid) else None,
         'checks': checks, 'registration_accuracy_verified': False,
         'material_side_confirmed': False, 'tool_geometry_confirmed': False,
         'robot_base_transform_included': False, 'ik_included': False, 'execution_allowed': False,
         'mapping_scope': 'normal-line local substrate fit; no tangential edge correction or nonrigid warping',
-        'normal_source': 'Exact STEP face normal; sign selected toward configured approach side',
+        'normal_source': sorted(poses.normal_source.unique().tolist()),
         'position_reference': 'surface_contact_point',
         'sample_fraction_is_not_surface_area_coverage': True,
     }
@@ -61,13 +62,14 @@ def per_path_summary(paths, table, poses):
 
 def write_report(dest, cfg, report):
     r = report
+    metric = lambda key: '无有效样本' if r[key] is None else f'{r[key]:.4f}'
     lines = ['# CAD 路径与扫描映射结果', '',
         '本次只处理 CAD、扫描与刀轴几何。位置参考点为表面接触点；全部长度单位 mm。', '',
         f"自动/手动生成 {r['reference_path_count']} 条 CAD 参考路径，采样 {r['reference_samples']} 点；",
         f"保留 {r['accepted_samples']} 个支持充分的位姿，拆为 {r['continuous_segments']} 个独立段，段内总长 {r['supported_path_length_mm']:.2f} mm。",
         f"采样点保留比例 {r['accepted_sample_fraction']:.1%}，不是工件表面覆盖率。", '',
-        f"局部法向修正绝对值：中位 {r['absolute_normal_offset_median_mm']:.4f} mm，P95 {r['absolute_normal_offset_p95_mm']:.4f} mm，最大 {r['absolute_normal_offset_max_mm']:.4f} mm。",
-        f"局部曲面拟合残差中位 {r['local_fit_rms_median_mm']:.4f} mm；数值位姿检查 {'通过' if r['checks']['passed'] else '失败'}。",
+        f"局部法向修正绝对值：中位 {metric('absolute_normal_offset_median_mm')}，P95 {metric('absolute_normal_offset_p95_mm')}，最大 {metric('absolute_normal_offset_max_mm')}（mm）。",
+        f"局部曲面拟合残差中位 {metric('local_fit_rms_median_mm')} mm；数值位姿检查 {'通过' if r['checks']['passed'] else '失败'}；有效位姿数 {r['accepted_samples']}。",
         '这些量描述局部几何贴合，不是独立测量的配准精度。', '',
         '## 文件', '', '| 文件 | 内容 |', '|---|---|',
         '| CAD_path_overview.png | CAD 上的原始路径、映射路径、法向与被拒绝样本 |',
@@ -94,7 +96,7 @@ def write_report(dest, cfg, report):
         '## 算法与限制', '',
         '路径在原始 STEP 的裁剪曲面上生成，法向从曲面直接计算；支持范围受扫描数据约束。',
         '沿 CAD 法向在有限邻域内拟合扫描局部曲面，使用鲁棒权重排除离群值，并拒绝多层、外推、缺失、噪声过大和法向分歧。',
-        '主刀轴使用 CAD 法向先验；扫描拟合法向及夹角单独保存，未自动混合。',
+        f"刀轴法向模式为 {cfg.get('normal_mode','cad')}；cad 使用 STEP 先验，scan 使用同一拟合曲面的导数法向；设计/扫描法向分别保存。",
         '映射后的接触点表示当前表面附近的拟合基体，不是去毛刺的最终去除终点；CAD 原始路径保留为设计参考。',
         '此版本只做法向局部修正，不修正横向轮廓错位；真实变形、孔边错配需额外处理。',
         '材料侧仍是 approach_outward_C 配置假设；开放 CAD 不能独立证明外侧。',

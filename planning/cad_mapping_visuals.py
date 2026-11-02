@@ -223,7 +223,15 @@ def write_mapping_visuals(output_dir, mesh_path, scan_points_C, reference_paths,
     for path in reference_paths:
         points = np.asarray(path['points_C'])
         ax.plot(*points.T, color=REFERENCE_COLOR, ls='--', lw=2.4)
-        ax.text(*points[len(points)//2], f" {path['path_id']}", fontsize=10, color='#774700')
+        if len(reference_paths) <= 6:
+            ax.text(*points[len(points)//2], f" {path['path_id']}", fontsize=10, color='#774700')
+    if len(reference_paths) > 6:
+        face_groups = {}
+        for path in reference_paths:
+            face_groups.setdefault(int(path['face_ids'][0]), []).append(path)
+        for fid, group in list(face_groups.items())[:8]:
+            midpoint = np.vstack([p['points_C'] for p in group]).mean(axis=0)
+            ax.text(*midpoint, f' Face {fid}: {len(group)} strokes', fontsize=10, color='#774700')
     for run in runs:
         ax.plot(*_coords(run, 'mapped').T, color=MAPPED_COLOR, lw=2.8)
     if len(reference_rejected):
@@ -371,7 +379,7 @@ def write_mapping_visuals(output_dir, mesh_path, scan_points_C, reference_paths,
     triad_legend = [Line2D([0], [0], color='#c63a36', lw=2, label='Tool X: forward tangent'),
                     Line2D([0], [0], color='#16834d', lw=2, label='Tool Y'),
                     Line2D([0], [0], color=TOOL_COLOR, lw=2, label='Tool +Z: toward surface'),
-                    Line2D([0], [0], color=NORMAL_COLOR, lw=2, label='Oriented CAD normal (assumed side)')]
+                    Line2D([0], [0], color=NORMAL_COLOR, lw=2, label='Selected surface normal (assumed side)')]
     ax.legend(handles=_figure_legend()[1:3]+triad_legend, loc='upper left', fontsize=9)
     fig.text(.5, .012, 'Origins are surface contact points. Triads match the exported pose convention. CAD frame, mm.',
              ha='center', fontsize=10, color='#555555')

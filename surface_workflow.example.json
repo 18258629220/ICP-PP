@@ -1,0 +1,43 @@
+{
+  "segmentation_chunk_points": 20000,
+  "mapping": {
+    "normal_mode": "scan",
+    "scan_sigma_mm": null,
+    "registration_sigma_mm": null,
+    "uncertainty_multiplier": 2.0,
+    "max_position_uncertainty_mm": null
+  },
+  "segmentation": {
+    "max_distance_mm": 1.0,
+    "ambiguity_margin_mm": 0.05,
+    "boundary_margin_mm": 0.1,
+    "max_normal_angle_deg": 35.0,
+    "normal_orientation_known": false,
+    "max_candidates": 64
+  },
+  "coverage": {
+    "face_ids": null,
+    "minimum_face_support": 12,
+    "raster_axis": 0,
+    "line_spacing_mm": 1.0,
+    "path_sampling_mm": 0.5,
+    "max_metric_probe_step": 0.1,
+    "max_lines_per_face": 512,
+    "max_path_samples": 100000
+  },
+  "process": {
+    "material_side_confirmed": false,
+    "allowance_threshold_mm": 0.1,
+    "deficit_threshold_mm": 0.1,
+    "boundary_margin_mm": 0.1,
+    "effective_contact_radius_mm": 0.5,
+    "following_error_bound_mm": 0.0,
+    "boundary_position_bound_mm": null,
+    "uncertainty_multiplier": 2.0,
+    "layer_depths_mm": [0.0],
+    "region_connection_radius_mm": 1.6,
+    "minimum_region_samples": 4,
+    "region_normal_cosine": 0.85,
+    "protected_uv_boxes": []
+  }
+}

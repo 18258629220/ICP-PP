@@ -45,5 +45,7 @@ dist/
 
 # Private planning settings and native crash dumps
 /planning.local.json
+/cad_mapping.local.json
+/surface_workflow.local.json
 core
 core.*

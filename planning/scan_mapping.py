@@ -5,6 +5,7 @@ not estimate removal depth, robot calibration, tool engagement or accessibility.
 """
 import numpy as np
 import pandas as pd
+from scipy.linalg import eigvalsh as generalized_eigvalsh
 from scipy.spatial import cKDTree, ConvexHull, QhullError
 from scipy.spatial.transform import Rotation
 from planning.geometry import tool_frame, unit
@@ -152,6 +153,18 @@ def fit_local_surface(point, normal, neighbors, cfg):
         result['conditional_position_sigma_mm'] = sigma
         result['position_uncertainty_mm'] = float(cfg.get('uncertainty_multiplier', 2.)*sigma)
     fit_normal = unit(basis @ np.array([-coef[1], -coef[2], 1.]))
+    # Principal curvatures of this fitted height surface at the normal-line
+    # intersection. Generalized II v = k I v accounts for nonzero local slopes;
+    # Hessian eigenvalues alone would only be correct at a horizontal tangent.
+    gradient = coef[1:3]
+    metric = np.eye(2)+np.outer(gradient, gradient)
+    hessian = (np.array([[2*coef[3], coef[4]], [coef[4], 2*coef[5]]])
+               if cfg['fit_degree'] == 2 else np.zeros((2, 2)))
+    second_form = hessian/np.sqrt(1.+gradient@gradient)
+    curvature = generalized_eigvalsh(second_form, metric)
+    result.update(principal_curvature_min_per_mm=float(curvature[0]),
+                  principal_curvature_max_per_mm=float(curvature[1]),
+                  max_abs_principal_curvature_per_mm=float(np.max(np.abs(curvature))))
     angle = float(np.degrees(np.arccos(np.clip(fit_normal@n, -1, 1))))
     result.update(scan_normal_x=fit_normal[0], scan_normal_y=fit_normal[1],
                   scan_normal_z=fit_normal[2], scan_normal_difference_deg=angle)

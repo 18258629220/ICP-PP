@@ -311,3 +311,38 @@ def test_path_correspondence_lengths_cannot_be_silently_truncated(cfg):
     path[0]['normals_C'] = path[0]['normals_C'][:2]
     with pytest.raises(ValueError, match='aligned finite arrays'):
         map_reference_paths(path, np.array([[0., 0., .1]]), cfg)
+
+
+def test_principal_curvature_of_paraboloid_and_rigid_rotation(cfg):
+    xy = grid()
+    kx, ky = .18, -.11
+    z = .12+.5*kx*xy[:, 0]**2+.5*ky*xy[:, 1]**2
+    neighbors = np.column_stack([xy, z])
+    fit = fit_local_surface(np.zeros(3), [0, 0, 1], neighbors, cfg)
+    assert fit['valid']
+    assert fit['principal_curvature_min_per_mm'] == pytest.approx(ky, abs=1e-10)
+    assert fit['principal_curvature_max_per_mm'] == pytest.approx(kx, abs=1e-10)
+    assert fit['max_abs_principal_curvature_per_mm'] == pytest.approx(kx, abs=1e-10)
+    rotation = Rotation.from_euler('xyz', [.7, -.4, 1.2]).as_matrix()
+    origin = np.array([10., 20., -4.])
+    rotated = fit_local_surface(origin, rotation@np.array([0., 0., 1.]),
+                                neighbors@rotation.T+origin, cfg)
+    assert rotated['valid']
+    assert rotated['max_abs_principal_curvature_per_mm'] == pytest.approx(kx, abs=1e-10)
+    assert rotated['principal_curvature_min_per_mm'] == pytest.approx(ky, abs=1e-10)
+
+
+def test_tilted_height_surface_curvature_uses_first_fundamental_form(cfg):
+    xy = grid()
+    slope, second = .2, .16
+    z = .1+slope*xy[:, 0]+.5*second*xy[:, 0]**2
+    fit = fit_local_surface(np.zeros(3), [0, 0, 1], np.column_stack([xy, z]), cfg)
+    assert fit['valid']
+    # Extruded parabola has one zero curvature, and k=h''/(1+h'^2)^(3/2).
+    assert fit['principal_curvature_min_per_mm'] == pytest.approx(0., abs=1e-10)
+    assert fit['max_abs_principal_curvature_per_mm'] == pytest.approx(
+        second/(1+slope**2)**1.5, abs=1e-10)
+    plane = fit_local_surface(np.zeros(3), [0, 0, 1],
+                              np.column_stack([xy, .1+slope*xy[:, 0]]), dict(cfg, fit_degree=1))
+    assert plane['valid']
+    assert plane['max_abs_principal_curvature_per_mm'] == 0.
