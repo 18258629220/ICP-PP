@@ -35,6 +35,7 @@ def prepare(cfg,out):
     finite=np.isfinite(xyz).all(axis=1)
     meta.update({'sha256':sha256(ROOT/cfg['scan_path']),'finite_count':int(finite.sum()),
                  'nonfinite_count':int((~finite).sum()),'units':'mm',
+                 'frame':cfg.get('scan_frame','SCAN_INPUT'),
                  'bbox_min_mm':xyz[finite].min(axis=0).tolist(),
                  'bbox_max_mm':xyz[finite].max(axis=0).tolist(),
                  'quantiles_mm':np.percentile(xyz[finite],[0.5,50,99.5],axis=0).tolist()})
@@ -137,12 +138,19 @@ def register(cfg,out):
         'selected_resolution_mm':best['resolution_mm'],'selected_candidate':best,
         'candidate_agreement':pairwise,'sample_count_for_surface_validation':len(evaluation),
         'source':'scan','target':'CAD','transform_direction':'p_C = R @ p_S + t',
+        'source_frame':cfg.get('scan_frame','SCAN_INPUT'),'target_frame':'CAD',
+        'primary_output_frame':'ROBOT_BASE' if cfg.get('scan_frame') == 'ROBOT_BASE' else 'CAD',
         'stable_datum_provided':False,'registration_regions':'all SOR-retained scan with Huber weighting',
         'independent_external_validation':False}
     dump_json(out/'registration_quality.json',quality)
     if not passed: raise RuntimeError('Registration gate failed; inspect candidates before deviation analysis')
     np.savetxt(out/'T_scan_to_CAD.txt',T,fmt='%.12f'); np.save(out/'T_scan_to_CAD.npy',T)
     write_aligned_ply(ROOT/cfg['scan_path'],out/'scan_aligned.ply',T)
+    if cfg.get('scan_frame') == 'ROBOT_BASE':
+        from planning.frames import write_registration_in_base
+        base_registration = write_registration_in_base(out, cfg)
+        logging.info('CAD located in robot base; original scan stays fixed. Checks: %s',
+                     base_registration['validation'])
     dump_json(out/'config.json',cfg|{'T_scan_to_CAD':T.tolist()})
     logging.info('Selected registration %g mm: %s',best['resolution_mm'],metrics)
 
