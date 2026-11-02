@@ -69,24 +69,40 @@ def project_to_face(point, topology, face_id):
     from OCP.gp import gp_Pnt, gp_Pnt2d
     from OCP.TopAbs import TopAbs_IN, TopAbs_ON
     face = topology.faces[face_id]
+    adaptor = face._geomAdaptor()
+    bounds = face.uvBounds()
+    def equivalents(value, low, high, periodic, period):
+        # OCCT returns canonical parameters; a trimmed periodic face may use a
+        # different chart, e.g. U=[6.21,6.36] across the 2*pi cylinder seam.
+        if not periodic:
+            return [value]
+        shift = int(round(((low+high)*.5-value)/period))
+        return [value+k*period for k in (shift,shift-1,shift+1)
+                if low-1e-8 <= value+k*period <= high+1e-8]
     projector = GeomAPI_ProjectPointOnSurf(gp_Pnt(*map(float, point)), topology.surfaces[face_id])
     if not projector.IsDone():
         return None
     best = None
     for i in range(1, projector.NbPoints()+1):
         u, v = projector.Parameters(i)
-        state = BRepClass_FaceClassifier(face.wrapped, gp_Pnt2d(u, v), 1e-8).State()
-        if state not in (TopAbs_IN, TopAbs_ON):
-            continue
-        normal, projected = face.normalAt(float(u), float(v))
-        q, n = np.asarray(projected.toTuple()), np.asarray(normal.toTuple())
-        if not np.isfinite(np.r_[q, n, u, v]).all() or np.linalg.norm(n) < 1e-12:
-            continue
-        distance = float(np.linalg.norm(point-q))
-        if best is None or distance < best['distance_mm']:
-            best = {'u': float(u), 'v': float(v), 'projected': q,
-                    'normal': n/np.linalg.norm(n), 'distance_mm': distance,
-                    'on_trim_boundary': state == TopAbs_ON}
+        us = equivalents(u,bounds[0],bounds[1],adaptor.IsUPeriodic(),
+                         adaptor.UPeriod() if adaptor.IsUPeriodic() else 1.)
+        vs = equivalents(v,bounds[2],bounds[3],adaptor.IsVPeriodic(),
+                         adaptor.VPeriod() if adaptor.IsVPeriodic() else 1.)
+        for uu in us:
+            for vv in vs:
+                state = BRepClass_FaceClassifier(face.wrapped, gp_Pnt2d(uu,vv), 1e-8).State()
+                if state not in (TopAbs_IN, TopAbs_ON):
+                    continue
+                normal, projected = face.normalAt(float(uu),float(vv))
+                q, n = np.asarray(projected.toTuple()), np.asarray(normal.toTuple())
+                if not np.isfinite(np.r_[q,n,uu,vv]).all() or np.linalg.norm(n) < 1e-12:
+                    continue
+                distance = float(np.linalg.norm(point-q))
+                if best is None or distance < best['distance_mm']:
+                    best = {'u':float(uu),'v':float(vv),'projected':q,
+                            'normal':n/np.linalg.norm(n),'distance_mm':distance,
+                            'on_trim_boundary':state == TopAbs_ON}
     return best
 
 

@@ -79,12 +79,18 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
     valid = faces >= 0
     planned = np.isin(faces,selected)
     figure = go.Figure()
+    nominal = topology.vertices[np.linspace(0,len(topology.vertices)-1,
+        min(50000,len(topology.vertices))).astype(int)]
+    figure.add_trace(go.Scatter3d(x=nominal[:,0],y=nominal[:,1],z=nominal[:,2],mode='markers',
+        name='CAD 标准形状（显示抽样）',visible='legendonly',
+        marker=dict(size=1.,color='#8b919a',opacity=.3),hoverinfo='skip'))
     for mask,name,color,size in [
         (valid & ~planned,'其余已归属型面','#a4adb8',1.4),
         (~valid,'边界、未匹配或不确定点','#d26446',1.6)]:
         q=points[mask]
         figure.add_trace(go.Scatter3d(x=q[:,0],y=q[:,1],z=q[:,2],mode='markers',name=name,
-            marker=dict(size=size,color=color,opacity=.45),hoverinfo='skip'))
+            marker=dict(size=size,color=color,opacity=.45),hoverinfo='skip',
+            visible='legendonly' if name.startswith('边界') else True))
     q=points[planned]
     colors = ['rgb('+','.join(map(str,np.round(255*_color(i)).astype(int)))+')' for i in faces[planned]]
     figure.add_trace(go.Scatter3d(x=q[:,0],y=q[:,1],z=q[:,2],mode='markers',name='规划型面（按CAD面分色）',
@@ -99,6 +105,9 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
         arrow = np.full((len(p)*3,3),np.nan);arrow[::3]=p-4*z;arrow[1::3]=p
         figure.add_trace(go.Scatter3d(x=arrow[:,0],y=arrow[:,1],z=arrow[:,2],mode='lines',
             name='刀轴 +Z 指向接触点',line=dict(color='#9b1c8c',width=6),hoverinfo='skip'))
+        figure.add_trace(go.Cone(x=p[:,0],y=p[:,1],z=p[:,2],u=z[:,0],v=z[:,1],w=z[:,2],
+            anchor='tip',sizemode='absolute',sizeref=1.2,showscale=False,
+            colorscale=[[0,'#9b1c8c'],[1,'#9b1c8c']],name='刀轴方向箭头',showlegend=False,hoverinfo='skip'))
     figure.update_layout(title='真实工件：CAD型面分割与随形接触路径<br><sup>分色=型面；蓝线=接触路径；紫线=刀轴。显示抽样，完整结果保存在PLY/CSV。</sup>',
         template='plotly_white',height=900,scene=dict(aspectmode='data',xaxis_title='CAD X / mm',
         yaxis_title='CAD Y / mm',zaxis_title='CAD Z / mm',camera=dict(eye=dict(x=1.4,y=-1.5,z=-1.3))),
@@ -106,18 +115,20 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
     figure.write_html(dest/'REAL_WORKPIECE.html',include_plotlyjs=True,config={'displaylogo':False,'scrollZoom':True})
 
     fig=plt.figure(figsize=(16,8),layout='constrained')
+    center_points=points[valid] if valid.any() else points
+    low,high=np.quantile(center_points,[.001,.999],axis=0); span=np.maximum(high-low,1.);mid=(low+high)/2
+    # Display only: all source rows, including unassigned outliers, remain in PLY.
+    in_view=valid & np.all((points >= low-.03*span) & (points <= high+.03*span),axis=1)
+    displayed=np.flatnonzero(in_view)[::2]
     for number in [1,2]:
         ax=fig.add_subplot(1,2,number,projection='3d')
-        show=np.arange(0,len(points),3)
+        show=displayed
         colors=np.tile([.65,.68,.72],(len(show),1))
         for fid in selected:
             colors[faces[show] == fid]=_color(fid)
-        colors[faces[show]<0]=[.8,.36,.24]
         ax.scatter(*points[show].T,s=.4,c=colors,alpha=.55,depthshade=False,rasterized=True)
         if number==2 and len(strokes):
             ax.plot(*strokes.T,color='#102b91',lw=.65)
-        center_points=points[valid] if valid.any() else points
-        low,high=np.quantile(center_points,[.001,.999],axis=0); span=np.maximum(high-low,1.);mid=(low+high)/2
         for setter,c,d in zip([ax.set_xlim,ax.set_ylim,ax.set_zlim],mid,span):setter(c-.54*d,c+.54*d)
         ax.set_box_aspect(span);ax.view_init(elev=-30,azim=-55)
         ax.set(xlabel='CAD X / mm',ylabel='CAD Y / mm',zlabel='CAD Z / mm',
@@ -125,6 +136,29 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
         ax.tick_params(labelsize=7);ax.grid(alpha=.15)
     fig.suptitle('Real workpiece: face segmentation and contact-axis planning',fontsize=16)
     fig.savefig(dest/'real_overview.png',dpi=180,facecolor='white');plt.close(fig)
+    if poses is not None and len(poses):
+        curved=[]
+        for _, group in poses.groupby('segment_id',sort=False):
+            if len(group)<10:
+                continue
+            normal=group[[f'tool_z_{a}' for a in 'xyz']].to_numpy(float)
+            spread=float(np.max(np.degrees(np.arccos(np.clip(normal@normal[len(normal)//2],-1,1)))))
+            curved.append((spread,group))
+        group=max(curved,key=lambda item:item[0])[1] if curved else poses.iloc[:min(30,len(poses))]
+        p=group[['x_mm','y_mm','z_mm']].to_numpy(float)
+        sample=np.unique(np.linspace(0,len(p)-1,min(12,len(p))).astype(int))
+        fig=plt.figure(figsize=(10,8),layout='constrained');ax=fig.add_subplot(111,projection='3d')
+        ax.plot(*p.T,color='#142fa0',lw=2,label='Surface contact path')
+        for axis,color in [('x','#c43232'),('y','#188b44'),('z','#9b1c8c')]:
+            vectors=group[[f'tool_{axis}_{a}' for a in 'xyz']].to_numpy(float)[sample]
+            ax.quiver(*p[sample].T,*vectors.T,length=2.,normalize=True,color=color,
+                      arrow_length_ratio=.25,label=f'Tool {axis.upper()}')
+        lo,hi=p.min(0)-2.5,p.max(0)+2.5
+        for setter,a,b in zip([ax.set_xlim,ax.set_ylim,ax.set_zlim],lo,hi):setter(a,b)
+        ax.set_box_aspect(np.maximum(hi-lo,1.));ax.view_init(elev=25,azim=-55)
+        ax.set(xlabel='CAD X / mm',ylabel='CAD Y / mm',zlabel='CAD Z / mm',
+               title='Contact-frame poses on a curved region\nPurple +Z points into the surface; origin is the contact point')
+        ax.legend(loc='upper left');fig.savefig(dest/'contact_axes_detail.png',dpi=180,facecolor='white');plt.close(fig)
     face_rows=[]
     for fid in selected:
         group=poses[poses.face_id==fid]
