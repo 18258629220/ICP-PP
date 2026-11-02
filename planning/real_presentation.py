@@ -130,7 +130,8 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
         if number==2 and len(strokes):
             ax.plot(*strokes.T,color='#102b91',lw=.65)
         for setter,c,d in zip([ax.set_xlim,ax.set_ylim,ax.set_zlim],mid,span):setter(c-.54*d,c+.54*d)
-        ax.set_box_aspect(span);ax.view_init(elev=-30,azim=-55)
+        # Matplotlib normalizes its aspect array in place; keep shared limits.
+        ax.set_box_aspect(span.copy());ax.view_init(elev=-30,azim=-55)
         ax.set(xlabel='CAD X / mm',ylabel='CAD Y / mm',zlabel='CAD Z / mm',
                title='Real scan — CAD face segmentation' if number==1 else 'Surface-following contact paths')
         ax.tick_params(labelsize=7);ax.grid(alpha=.15)
