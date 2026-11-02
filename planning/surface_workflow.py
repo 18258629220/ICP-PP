@@ -41,12 +41,8 @@ def validate_surface_config(cfg):
     boundary_bound = process.get('boundary_position_bound_mm')
     if boundary_bound is not None and (not np.isfinite(boundary_bound) or boundary_bound < 0):
         raise ValueError('boundary_position_bound_mm must be null or finite and nonnegative')
-    depths = np.asarray(process['layer_depths_mm'], float)
-    if (depths.ndim != 1 or not len(depths) or not np.isfinite(depths).all()
-            or depths[0] != 0 or np.any(np.diff(depths) <= 0)):
-        raise ValueError('layer_depths_mm must start at zero and strictly increase')
-    if np.any(depths > 0) and not process['material_side_confirmed']:
-        raise ValueError('Positive layer depths require material_side_confirmed')
+    if process.get('layer_depths_mm', [0.]) != [0.]:
+        raise ValueError('Only the as-scanned surface contact layer [0.0] is supported')
     for box in process.get('protected_uv_boxes', []):
         bounds = np.asarray(box['bounds'], float)
         if bounds.shape != (4,) or not np.isfinite(bounds).all() or bounds[0] >= bounds[1] or bounds[2] >= bounds[3]:
@@ -424,52 +420,4 @@ def assign_process_regions(table, topology, cfg):
             else:
                 result.loc[ids, 'region_id'] = next_region
                 next_region += 1
-    return result
-
-
-def target_layer_table(table, depth, cfg):
-    """Constant-depth parallel offsets from the fitted as-is surface.
-
-Positive layers are restricted by lower-bound CAD allowance and material-side
-confirmation. Normals are unchanged for a regular constant normal offset;
-curvature singularities/tool engagement are not certified by this preview.
-"""
-    if not np.isfinite(depth) or depth < 0:
-        raise ValueError('Invalid layer depth')
-    result = table.copy()
-    result['layer_depth_mm'] = depth
-    if depth == 0:
-        return result
-    if not cfg['process']['material_side_confirmed']:
-        raise ValueError('Material side must be confirmed for positive target layers')
-    normal = result[[f'normal_{a}' for a in 'xyz']].to_numpy(float)
-    cad_normal = result[[f'cad_normal_{a}' for a in 'xyz']].to_numpy(float)
-    projection = np.einsum('ij,ij->i', normal, cad_normal)
-    curvature = result.get('max_abs_principal_curvature_per_mm', pd.Series(np.nan, index=result.index))
-    allowed = (result.valid.astype(bool) & result.process_eligible & (projection > 0)
-               & (result.offset_lower_mm >= depth*projection)
-               & np.isfinite(curvature) & (depth*curvature < .5)
-               & (result.boundary_distance_mm >= result.required_boundary_margin_mm+depth))
-    result.loc[~allowed, 'valid'] = False
-    result.loc[~allowed, 'process_eligible'] = False
-    result.loc[~allowed, 'status'] = 'target_layer_not_supported'
-    for j, axis in enumerate('xyz'):
-        result.loc[allowed, f'mapped_{axis}_mm'] -= depth*normal[allowed, j]
-        result.loc[~allowed, f'mapped_{axis}_mm'] = np.nan
-    # Rebuild segment identities after removing points, never bridge a lost sample.
-    segment, previous = -1, None
-    for idx, row in result.iterrows():
-        if not row.valid:
-            result.loc[idx, 'segment_id'] = -1
-            previous = None
-            continue
-        if previous is None or row.path_id != previous.path_id or row.sample_index != previous.sample_index+1 or row.segment_id != previous.segment_id:
-            segment += 1
-        result.loc[idx, 'segment_id'] = segment
-        previous = row
-    sizes = result.loc[result.valid].groupby('segment_id').size()
-    single = result.segment_id.isin(sizes[sizes < 2].index)
-    result.loc[single, ['valid','status','segment_id']] = [False,'isolated_target_sample',-1]
-    result.loc[~result.valid.astype(bool), 'process_eligible'] = False
-    result.loc[~result.valid.astype(bool), [f'mapped_{a}_mm' for a in 'xyz']] = np.nan
     return result

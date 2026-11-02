@@ -8,13 +8,17 @@ from pipeline_common import ROOT,config,dump_json,read_ply,xyz_of,transform_poin
 
 def main():
     cfg=config();out=ROOT/cfg['output_dir']
+    in_base=cfg.get('scan_frame')=='ROBOT_BASE'
+    source_frame=cfg.get('scan_frame','SCAN_INPUT')
+    output_frame='ROBOT_BASE' if in_base else 'CAD'
     load=lambda name:json.loads((out/name).read_text())
     T=np.load(out/'T_scan_to_CAD.npy'); assert_rigid(T)
     original,_=read_ply(ROOT/cfg['scan_path']);aligned,_=read_ply(out/'scan_aligned.ply')
     assert len(original)==len(aligned)
-    for field in ['intensity','event_id','camera_column']:
+    for field in original.dtype.names:
+        if field in ('x','y','z'): continue
         assert np.array_equal(original[field],aligned[field]),f'{field} changed'
-    ids=np.random.default_rng(9).choice(len(original),10000,replace=False)
+    ids=np.random.default_rng(9).choice(len(original),min(len(original),10000),replace=False)
     p=xyz_of(original[ids]);expected=transform_points(p,T);actual=xyz_of(aligned[ids])
     error=float(np.max(np.abs(actual-expected)))
     assert error<1e-3
@@ -28,9 +32,10 @@ def main():
     np.testing.assert_allclose(full['euclidean_distance_mm'][ids],distances,atol=1e-4)
     np.testing.assert_allclose(full['signed_normal_mm'][ids],np.einsum('ij,ij->i',actual-nearest['points'],nearest['primitive_normals']),atol=1e-4)
     validations={'rigid_transform_pass':True,'det_R':float(np.linalg.det(T[:3,:3])),
+        'scan_frame':source_frame,'primary_output_frame':output_frame,'analysis_frame':'CAD',
         'all_original_attributes_preserved':True,'point_count_preserved':len(original),
         'transformed_coordinate_max_error_mm':error,'full_resolution_row_correspondence_pass':True,
-        'synthetic_tests':'see tests.log; known box +/-2 mm offsets and known rigid transform',
+        'validation_scope':'actual artifact consistency; no independent physical accuracy claim',
         'external_metrology_validation':False}
     dump_json(out/'validation_results.json',validations)
     s=pd.read_csv(out/'deviation_summary.csv');raw=s.iloc[0];good=s.iloc[1] if len(s)>1 else None
@@ -58,17 +63,27 @@ def main():
         candidate_lines.append(f"| {r['resolution_mm']:g} | {r['final_inliers']} | {score} |")
     candidates='\n'.join(candidate_lines)
     signs='封闭、绕序一致且有正体积，外法向拓扑检查通过' if m['outward_normals_verified'] else '未通过闭合外法向验证，正负值仅表示局部三角面法向方向，不能解释为多料/缺料'
+    frame_text=(
+        '用户已确认原始扫描 XYZ 就是机器人基坐标 `ROBOT_BASE`；主交付保持原扫描不动，'
+        '用 `T_CAD_to_BASE = inv(T_scan_to_CAD)` 将 CAD 和接触框架定位到基坐标。'
+        '兼容矩阵 `T_scan_to_CAD` 数值等于 `T_BASE_to_CAD`，仅供 CAD 曲面内部几何审核；'
+        '该矩阵不是相机外参、机器人手眼标定或 TCP 标定。'
+        if in_base else f'原始扫描坐标声明为 `{source_frame}`；当前兼容矩阵映射到 CAD 局部坐标，不代表相机外参或机器人手眼标定。')
+    transform_text=('`p_C = T_BASE_to_CAD @ p_B`；主交付采用逆向 `p_B = T_CAD_to_BASE @ p_C`'
+                    if in_base else '`p_C = R @ p_S + t`')
+    base_files=('\n- `CAD_in_BASE.ply`、`T_CAD_to_BASE.npy/.txt`、`T_BASE_to_CAD.npy/.txt`、`registration_BASE.json`：CAD 在机器人基坐标中的定位及变换检查。'
+                if in_base else '')
     text=f'''# CAD–扫描点云配准与偏差分析报告
 
-本报告由实际运行结果生成。完成方案 M1–M6 及 M7 的软件数值验证；状态为**工程初步分析**。没有独立物理基准、重复扫描、扫描仪精度、正式公差及机器人标定，尚不能签署计量验收或生成可执行打磨轨迹。
+本报告由实际运行结果生成，状态为**工程初步分析**。主输出坐标为 `{output_frame}`，本报告的偏差表和偏差热图保留 CAD 局部坐标用于内部审核。没有独立物理基准、重复扫描、扫描仪精度、正式公差及完整机器人/工具标定，尚不能签署计量验收或生成可执行打磨轨迹。
 
 ## 输入与几何检查
 
 - 工作目录：`{ROOT}`；单位：mm。
-- 扫描点数：{sm['count']:,}；有限点数：{sm['finite_count']:,}；17 字节交错顶点记录，XYZ 与 intensity / event_id / camera_column 按头解析。
-- 扫描文件标记为 incomplete、provisional；输出保留全部原始点的顺序和属性。
-- 扫描包围盒：{sm['bbox_min_mm']} → {sm['bbox_max_mm']}。
-- CAD 包围盒：{cm['bbox_min_mm']} → {cm['bbox_max_mm']}。
+- 扫描点数：{sm['count']:,}；有限点数：{sm['finite_count']:,}；{sm['stride_bytes']} 字节交错顶点记录，XYZ 与标量属性按头解析。
+- 原始扫描点序和标量属性完整保留；主交付分割点云的原始 XYZ 不变，`scan_aligned.ply` 是仅用于 CAD 内部审核的派生副本。
+- 原始扫描包围盒（`{source_frame}`）：{sm['bbox_min_mm']} → {sm['bbox_max_mm']}。
+- CAD 原生局部坐标包围盒：{cm['bbox_min_mm']} → {cm['bbox_max_mm']}。与基坐标下的扫描包围盒不可直接逐轴比较。
 - CAD 实体数：{cm['solids']}；面数：{cm['faces']}；B-rep 有效性：{cm['cad_valid']}。
 - CAD 声明的模型不确定度：{cm['step_declared_uncertainty_mm']} mm；这不是扫描仪精度，也不是工艺公差。
 - 网格：{m['vertices']:,} 顶点 / {m['triangles']:,} 三角面；绝对线性离散参数 {cfg['mesh_linear_deflection_mm']} mm，角度参数 {cfg['mesh_angular_deflection_rad']} rad。该参数不是经认证的全局网格误差上界。
@@ -86,19 +101,19 @@ def main():
 
 配准门槛：fitness ≥ {cfg['quality_gate_min_fitness']} 且独立查询的三角面距离中位数 ≤ {cfg['quality_gate_max_median_distance_mm']} mm。这是工程筛查门槛，未替代独立基准测量。
 
-变换方向：`p_C = R @ p_S + t`（列向量）；NumPy 行向量等价于 `p_C = p_S @ R.T + t`。
+变换方向：{transform_text}（列向量）；内部 NumPy 行向量等价于 `p_C = p_S @ R.T + t`。下列兼容矩阵的方向始终为扫描→CAD。
 
 ```text
 {np.array2string(T,precision=10,suppress_small=True)}
 ```
 
-候选间位移一致性见 `registration_quality.json`。原始 PLY 坐标已含暂定变换，本矩阵只从当前文件坐标映射到 CAD，不等同于相机外参或机器人手眼标定。
+{frame_text} 候选间位移一致性见 `registration_quality.json`。
 
 {sensitivity_text}
 
 ## 偏差与覆盖
 
-局部法向偏差 `d = dot(p - q, n)`；同时报告真实最近距离 `||p - q||`。在三角形边缘，`|d|` 可能小于真实距离，二者不可混用。
+内部审核在 CAD 局部坐标计算局部法向偏差 `d = dot(p - q, n)`；同时报告真实最近距离 `||p - q||`。刚体变换保持这两个标量的数值；表中的 XYZ 和法向分量仍属于 CAD 坐标，不是机器人基坐标路径。在三角形边缘，`|d|` 可能小于真实距离，二者不可混用。
 
 偏差表以 {cfg['analysis_voxel_mm']:g} mm 体素质心为单位，属于体素计数统计，既非原始扫描密度加权，也非严格的 CAD 面积加权。完整 {len(original):,} 点的 NPY 按原始行号保存。
 
@@ -116,22 +131,22 @@ CAD 均匀面积采样点中，{coverage['fraction_within_2mm']:.2%} 距扫描�
 
 ## 验证记录与使用限制
 
-- 变换正交性、det(R)=+1、逆向往返检查通过；输出坐标 float32 最大舍入差 {error:.7f} mm。
-- 全部原始属性及点数保留检查通过；完整偏差 NPY 随机抽取 10,000 行重新查询验证通过。
-- 合成盒体已知 ±2 mm 法向偏差、边缘距离差异、已知刚体变换恢复、交错字段/大小端解析、截断文件拒绝，详见 `tests.log`。
-- 未获得稳定定位基准、重复扫描或已知尺寸实测点，尚未完成 M7 的物理计量校验。
-- M8/M9 需要机器人模型、工具几何、手眼/装夹外参、正式余量、公差及接触工艺参数，未生成虚构的 `target_pose.csv` 或机器人轨迹。
+- 变换正交性与 det(R)=+1 检查通过；CAD 审核副本的 float32 坐标最大舍入差 {error:.7f} mm。这不是原始基坐标扫描的变换误差。
+- 全部原始标量属性及点数保留检查通过；完整偏差 NPY 抽取 {len(ids):,} 行重新查询验证通过。
+- 本报告仅列出本次实际文件的一致性检查，不将未运行的历史测试作为本轮验证结果。
+- 基坐标来源确认不等于独立实物精度认证；尚缺稳定定位基准、重复扫描或已知尺寸实测点。
+- 实际机器人执行还需机器人模型、工具/TCP、坐标标定核验、正式余量、公差及接触工艺参数；接触点和刀轴框架本身不是可执行机器人轨迹。
 
 ## 文件入口
 
-- `registration_before_after.png`、`registration_projections.png`、`registration_detail.png`：整体叠加、投影与 CAD 边界范围放大图。
-- `registration_3d.html`：离线可旋转 CAD/扫描叠加。
-- `deviation_heatmap_3d.html`、`deviation_heatmap_xy.png`：质量筛选偏差视图（灰色为未通过筛选点）。
-- `deviation_heatmap_all_points_3d.html`、`deviation_heatmap_projections.png`、`deviation_distribution.png`：全体点偏差视图。
-- `cad_coverage_3d.html`：扫描覆盖代理视图。
-- `deviation_points.csv` / `.npy`：1 mm 分析点、最近点、法向、偏差与质量标记。
+- `registration_before_after.png`、`registration_projections.png`、`registration_detail.png`：`{output_frame}` 注册显示，{'原扫描固定，CAD 逆变换到基坐标' if in_base else 'CAD 局部坐标审核'}。
+- [registration_3d.html](registration_3d.html)：主配准交互入口，坐标为 `{output_frame}`。{base_files}
+- `deviation_heatmap_3d.html`、`deviation_heatmap_xy.png`：CAD 坐标内部质量筛选偏差视图（灰色为未通过筛选点）。
+- `deviation_heatmap_all_points_3d.html`、`deviation_heatmap_projections.png`、`deviation_distribution.png`：CAD 内部全体点偏差审核视图。
+- `cad_coverage_3d.html`：CAD 局部坐标的覆盖代理审核视图。
+- `deviation_points.csv` / `.npy`：{cfg['analysis_voxel_mm']:g} mm 分析点、最近点、法向均为 CAD 局部坐标，附偏差与质量标记。
 - `deviation_full_resolution.npy`：每个原始扫描点的法向偏差、真实距离、最近三角面索引，逐行对应原 PLY。
-- `T_scan_to_CAD.txt` / `.npy`、`scan_aligned.ply`：矩阵与保留属性的完整对齐点云。
+- `T_scan_to_CAD.txt` / `.npy`、`scan_aligned.ply`：兼容的扫描→CAD 矩阵与保留属性的 CAD 内部审核点云。
 - `config.json`、`software_versions.json`、`run.log`、`validation_results.json`：运行溯源。
 '''
     (out/'REPORT_zh.md').write_text(text)

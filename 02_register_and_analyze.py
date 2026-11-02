@@ -145,6 +145,7 @@ def register(cfg,out):
     dump_json(out/'registration_quality.json',quality)
     if not passed: raise RuntimeError('Registration gate failed; inspect candidates before deviation analysis')
     np.savetxt(out/'T_scan_to_CAD.txt',T,fmt='%.12f'); np.save(out/'T_scan_to_CAD.npy',T)
+    # CAD-local copy is retained for deviation analysis only; the BASE scan stays fixed.
     write_aligned_ply(ROOT/cfg['scan_path'],out/'scan_aligned.ply',T)
     if cfg.get('scan_frame') == 'ROBOT_BASE':
         from planning.frames import write_registration_in_base
@@ -219,12 +220,17 @@ def analyze(cfg,out):
     cad=o3d.io.read_point_cloud(str(out/'cad_surface_sample.ply')); c=np.asarray(cad.points)
     coverage_dist=cKDTree(p).query(c,workers=4)[0]
     np.savez_compressed(out/'cad_coverage.npz',points=c.astype(np.float32),nearest_scan_distance_mm=coverage_dist.astype(np.float32))
-    coverage={'definition':'fraction of uniform CAD area samples within radius of scan voxel centroids',
+    coverage={'frame':'CAD','purpose':'internal CAD-local deviation and coverage audit',
+        'primary_output_frame':'ROBOT_BASE' if cfg.get('scan_frame')=='ROBOT_BASE' else 'CAD',
+        'definition':'fraction of uniform CAD area samples within radius of scan voxel centroids',
         'fraction_within_2mm':float(np.mean(coverage_dist<=2)),
         'fraction_within_5mm':float(np.mean(coverage_dist<=5)),
         'missing_regions_have_no_measured_deviation':True}
     dump_json(out/'coverage_summary.json',coverage)
-    dump_json(out/'analysis_quality.json',{'analyzed_points':len(p),'quality_retained':int(good.sum()),
+    dump_json(out/'analysis_quality.json',{'frame':'CAD','purpose':'internal CAD-local deviation audit',
+        'primary_output_frame':'ROBOT_BASE' if cfg.get('scan_frame')=='ROBOT_BASE' else 'CAD',
+        'coordinate_columns':'scan_*, cad_closest_*, normal_* in deviation_points are CAD-local',
+        'analyzed_points':len(p),'quality_retained':int(good.sum()),
         'quality_fraction':float(good.mean()),'outward_normals_verified':outward,
         'near_triangle_edge_fraction':float(edge.mean()),'full_resolution_count':len(raw),
         'signed_definition':'dot(scan - CAD closest point, CAD triangle normal)',

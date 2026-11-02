@@ -39,7 +39,8 @@ def test_streaming_matches_all_rows_and_support_for_different_chunks(tmp_path):
     raw = _scan(scan, points-transform[:3,3])
     original = scan.read_bytes()
     assert isinstance(raw, np.memmap)
-    all_rows = segment_points(transform_points(xyz_of(raw), transform), topology)
+    all_rows = segment_points(transform_points(xyz_of(raw), transform), topology).assign(
+        frame='CAD_LOCAL', source_frame='ROBOT_BASE')
     results = []
     for chunk in (1,3,100):
         out = tmp_path/f'chunk_{chunk}'

@@ -9,14 +9,13 @@ from scipy.linalg import eigvalsh as generalized_eigvalsh
 from scipy.spatial import cKDTree, ConvexHull, QhullError
 from scipy.spatial.transform import Rotation
 from planning.geometry import tool_frame, unit
-from pipeline_common import assert_rigid
 
 
 def validate_mapping_config(cfg):
     positive = ('path_sampling_mm', 'search_radius_mm', 'tangent_radius_mm',
                 'max_normal_offset_mm', 'layer_gap_mm', 'max_fit_rms_mm',
                 'min_tangent_spread_mm', 'max_point_jump_mm', 'max_offset_step_mm',
-                'max_normal_change_deg', 'max_pose_step_deg', 'example_ball_radius_mm',
+                'max_normal_change_deg', 'max_pose_step_deg',
                 'max_support_gap_mm')
     for key in positive:
         if not np.isfinite(cfg[key]) or cfg[key] <= 0:
@@ -345,104 +344,3 @@ def finalize_pose_segments(table, cfg):
         result.loc[ids, ['qx', 'qy', 'qz', 'qw']] = quat
     result.loc[~result.valid.astype(bool), ['mapped_x_mm', 'mapped_y_mm', 'mapped_z_mm']] = np.nan
     return result
-
-
-def export_contact_poses(table, T_scan_to_CAD, cfg):
-    """Return accepted contact-frame poses in CAD C and saved-scan S coordinates.
-
-    Updates input ``table`` validity, segments and frame columns in-place, so the
-    all-sample diagnostic CSV agrees with exported poses even for legacy callers.
-    Empty accepted results yield schema-preserving CSV tables and (0,4,4) arrays.
-    """
-    assert_rigid(T_scan_to_CAD)
-    finalized = finalize_pose_segments(table, cfg)
-    for column in finalized:
-        table[column] = finalized[column]
-    cad = table.loc[table.valid].copy().reset_index(drop=True)
-    R = np.empty((len(cad), 3, 3))
-    for j, axis in enumerate('xyz'):
-        R[:, :, j] = cad[[f'tool_{axis}_{a}' for a in 'xyz']].to_numpy(float)
-    cad['frame'] = 'CAD'
-    cad['position_reference'] = 'surface_contact_point'
-    if 'normal_source' not in cad:
-        cad['normal_source'] = 'STEP_face_transferred_rigidly'
-    cad['normal_side_confirmed'] = False
-    cad['execution_allowed'] = False
-    cad['example_ball_radius_mm'] = cfg['example_ball_radius_mm']
-    for j, axis in enumerate('xyz'):
-        cad[f'{axis}_mm'] = cad[f'mapped_{axis}_mm']
-        for k, component in enumerate('xyz'):
-            cad[f'tool_{axis}_{component}'] = R[:, k, j]
-    p = cad[['x_mm','y_mm','z_mm']].to_numpy()
-    normals = cad[['normal_x','normal_y','normal_z']].to_numpy()
-    center = p+cfg['example_ball_radius_mm']*normals
-    for j, axis in enumerate('xyz'):
-        cad[f'example_ball_center_{axis}_mm'] = center[:, j]
-    T_C = np.tile(np.eye(4), (len(cad),1,1))
-    T_C[:, :3, :3], T_C[:, :3, 3] = R, p
-    inv = np.linalg.inv(T_scan_to_CAD)
-    T_S = inv[None] @ T_C
-    scan = cad.copy()
-    scan['frame'] = 'SCAN_INPUT'
-    # Every vector/position column is transformed consistently, including diagnostics.
-    for prefix, suffix, is_point in [('','_mm',True), ('cad_','_mm',True), ('mapped_','_mm',True),
-                                     ('example_ball_center_','_mm',True), ('normal_','',False),
-                                     ('cad_normal_','',False), ('scan_normal_','',False), ('tool_x_','',False),
-                                     ('tool_y_','',False), ('tool_z_','',False)]:
-        keys = [f'{prefix}{a}{suffix}' for a in 'xyz']
-        if not all(k in scan for k in keys):
-            continue
-        v = cad[keys].to_numpy() @ inv[:3,:3].T
-        if is_point:
-            v += inv[:3,3]
-        scan[keys] = v
-    for _, ids in scan.groupby('segment_id', sort=False).groups.items():
-        q = Rotation.from_matrix(T_S[ids, :3, :3]).as_quat()
-        for j in range(1,len(q)):
-            if q[j]@q[j-1] < 0:
-                q[j] *= -1
-        scan.loc[ids, ['qx','qy','qz','qw']] = q
-    return cad, scan, T_C, T_S
-
-
-def validate_contact_poses(cad, scan, T_C, T_S, transform, cfg):
-    if (not len(cad) and not len(scan) and T_C.shape == (0, 4, 4) and T_S.shape == (0, 4, 4)):
-        return dict(passed=True, empty=True, accepted_pose_count=0, physical_accuracy_verified=False)
-    if not len(cad) or len(cad) != len(scan) or len(cad) != len(T_C) or T_C.shape != T_S.shape or not np.isfinite(T_C).all() or not np.isfinite(T_S).all():
-        raise ValueError('Empty or nonfinite poses')
-    if not cad[['path_id','sample_index','segment_id']].equals(scan[['path_id','sample_index','segment_id']]):
-        raise ValueError('CAD and scan pose identifiers differ')
-    orth = np.max(np.abs(np.swapaxes(T_C[:,:3,:3],1,2)@T_C[:,:3,:3]-np.eye(3)))
-    roundtrip = np.max(np.abs(transform[None]@T_S-T_C))
-    qerror = np.max(np.abs(Rotation.from_quat(cad[['qx','qy','qz','qw']]).as_matrix()-T_C[:,:3,:3]))
-    sqerror = np.max(np.abs(Rotation.from_quat(scan[['qx','qy','qz','qw']]).as_matrix()-T_S[:,:3,:3]))
-    normals = cad[['normal_x','normal_y','normal_z']].to_numpy()
-    axis_error = np.max(np.abs(T_C[:,:3,2]+normals))
-    det_error = np.max(np.abs(np.linalg.det(T_C[:,:3,:3])-1))
-    center = cad[[f'example_ball_center_{a}_mm' for a in 'xyz']].to_numpy()
-    center_error = np.max(np.abs(center-T_C[:,:3,3]-cfg['example_ball_radius_mm']*normals))
-    maxstep, maxangle = 0., 0.
-    for _, ids in cad.groupby('segment_id', sort=False).groups.items():
-        p = T_C[ids,:3,3]
-        maxstep = max(maxstep,float(np.linalg.norm(np.diff(p,axis=0),axis=1).max()))
-        r = Rotation.from_matrix(T_C[ids,:3,:3])
-        maxangle = max(maxangle,float(np.degrees((r[:-1].inv()*r[1:]).magnitude()).max()))
-    errors = dict(rotation_orthogonality_error=float(orth), transform_roundtrip_max_mm=float(roundtrip),
-                  cad_quaternion_matrix_error=float(qerror), scan_quaternion_matrix_error=float(sqerror),
-                  axis_normal_error=float(axis_error), rotation_determinant_error=float(det_error),
-                  example_center_error_mm=float(center_error))
-    for name, frame, matrices in [('cad',cad,T_C),('scan',scan,T_S)]:
-        errors[f'{name}_csv_position_error_mm'] = float(np.max(np.abs(frame[['x_mm','y_mm','z_mm']].to_numpy()-matrices[:,:3,3])))
-        for j,axis in enumerate('xyz'):
-            values = frame[[f'tool_{axis}_{a}' for a in 'xyz']].to_numpy()
-            errors[f'{name}_csv_axis_{axis}_error'] = float(np.max(np.abs(values-matrices[:,:3,j])))
-        values = frame[[f'example_ball_center_{a}_mm' for a in 'xyz']].to_numpy()
-        n = frame[[f'normal_{a}' for a in 'xyz']].to_numpy()
-        errors[f'{name}_csv_center_error_mm'] = float(np.max(np.abs(values-matrices[:,:3,3]-cfg['example_ball_radius_mm']*n)))
-        errors[f'{name}_normal_direction_error'] = float(np.max(np.abs(n+matrices[:,:3,2])))
-    if not np.isfinite(list(errors.values())).all() or max(errors.values()) > 1e-8 or maxstep > cfg['max_point_jump_mm']+1e-8 or maxangle > cfg['max_pose_step_deg']+1e-8:
-        raise ValueError(f'Pose validation failed: {errors}, step={maxstep}, angle={maxangle}')
-    if cad.execution_allowed.any() or scan.execution_allowed.any():
-        raise ValueError('Unexpected execution authorization')
-    return dict(passed=True, empty=False, accepted_pose_count=len(cad), **errors, max_segment_step_mm=maxstep,
-                max_segment_orientation_step_deg=maxangle, physical_accuracy_verified=False)

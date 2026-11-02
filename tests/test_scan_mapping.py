@@ -10,14 +10,15 @@ from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from planning.scan_mapping import (
-    contact_frames, export_contact_poses, fit_local_surface,
-    map_reference_paths, validate_contact_poses, validate_mapping_config,
+    contact_frames, fit_local_surface,
+    map_reference_paths, validate_mapping_config,
 )
 
 
 @pytest.fixture
 def cfg():
-    return json.loads((Path(__file__).resolve().parents[1]/'cad_mapping.example.json').read_text())
+    config = json.loads((Path(__file__).resolve().parents[1]/'surface_workflow.example.json').read_text())
+    return dict(config['mapping'], path_sampling_mm=config['coverage']['path_sampling_mm'])
 
 
 def grid(radius=1.5, step=.15):
@@ -102,52 +103,6 @@ def test_missing_samples_and_isolates_never_join(cfg):
     assert np.isnan(table.iloc[3].mapped_z_mm)
 
 
-def test_contact_pose_rigid_transform_and_example_ball_center(cfg):
-    n = np.array([.2, -.3, 1.])
-    n /= np.linalg.norm(n)
-    tangent = np.cross([0., 1., 0.], n)
-    tangent /= np.linalg.norm(tangent)
-    reference = np.array([10., -4., 3.])+np.arange(5)[:, None]*.5*tangent
-    contact = reference+.13*n
-    table = pd.DataFrame(dict(path_id='known', sample_index=np.arange(5), valid=True,
-                              segment_id=0, status='accepted', support_count=50,
-                              offset_mm=.13, fit_rms_mm=0.))
-    for j, a in enumerate('xyz'):
-        table[f'cad_{a}_mm'] = reference[:, j]
-        table[f'mapped_{a}_mm'] = contact[:, j]
-        table[f'normal_{a}'] = n[j]
-        table[f'scan_normal_{a}'] = n[j]
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_euler('xyz', [.2, -.4, .8]).as_matrix()
-    T[:3, 3] = [100., -50., 23.]
-    cad, scan, TC, TS = export_contact_poses(table, T, cfg)
-    expected_scan = (contact-T[:3, 3])@T[:3, :3]
-    expected_normal = n@T[:3, :3]
-    np.testing.assert_allclose(scan[['x_mm', 'y_mm', 'z_mm']], expected_scan, atol=1e-11)
-    np.testing.assert_allclose(scan[['normal_x', 'normal_y', 'normal_z']], np.tile(expected_normal, (5, 1)), atol=1e-12)
-    np.testing.assert_allclose(cad[[f'example_ball_center_{a}_mm' for a in 'xyz']], contact+2*n, atol=1e-12)
-    np.testing.assert_allclose(scan[[f'example_ball_center_{a}_mm' for a in 'xyz']], expected_scan+2*expected_normal, atol=1e-11)
-    np.testing.assert_allclose(scan[[f'cad_{a}_mm' for a in 'xyz']], (reference-T[:3, 3])@T[:3, :3], atol=1e-11)
-    expected_cad_axes = np.column_stack([tangent, np.cross(-n, tangent), -n])
-    expected_scan_axes = T[:3, :3].T@expected_cad_axes
-    for j, a in enumerate('xyz'):
-        np.testing.assert_allclose(cad[[f'tool_{a}_{c}' for c in 'xyz']], np.tile(expected_cad_axes[:, j], (5, 1)), atol=1e-12)
-        np.testing.assert_allclose(scan[[f'tool_{a}_{c}' for c in 'xyz']], np.tile(expected_scan_axes[:, j], (5, 1)), atol=1e-12)
-    np.testing.assert_allclose(T[None]@TS, TC, atol=1e-11)
-    np.testing.assert_allclose(Rotation.from_quat(cad[['qx','qy','qz','qw']]).apply([0,0,1]), np.tile(-n, (5,1)), atol=1e-12)
-    assert not cad.execution_allowed.any()
-    assert not scan.execution_allowed.any()
-    assert cad.position_reference.eq('surface_contact_point').all()
-    assert validate_contact_poses(cad, scan, TC, TS, T, cfg)['passed']
-    # CSV fields are deliverables too: a correct NPZ must not conceal corrupted CSV.
-    for key, value in [('x_mm', 999.), ('tool_z_x', 7.),
-                       ('example_ball_center_y_mm', -999.), ('x_mm', np.nan)]:
-        broken = scan.copy()
-        broken.loc[0, key] = value
-        with pytest.raises(ValueError, match='validation failed'):
-            validate_contact_poses(cad, broken, TC, TS, T, cfg)
-
-
 def test_scan_normal_mode_couples_surface_position_and_axis(cfg):
     cfg = dict(cfg, normal_mode='scan', fit_degree=2)
     xy = grid(3., .12)
@@ -165,9 +120,7 @@ def test_scan_normal_mode_couples_surface_position_and_axis(cfg):
                                np.tile([0, 0, 1.], (len(xs), 1)))
     np.testing.assert_allclose(table.u, xs)
     assert table.normal_source.eq('scan_local_surface_derivative').all()
-    cad, scan, TC, TS = export_contact_poses(table, np.eye(4), cfg)
-    np.testing.assert_allclose(TC[:, :3, 2], -expected, atol=1e-9)
-    assert validate_contact_poses(cad, scan, TC, TS, np.eye(4), cfg)['passed']
+    np.testing.assert_allclose(table[['tool_z_x','tool_z_y','tool_z_z']], -expected, atol=1e-9)
 
 
 def test_external_uncertainty_is_not_inferred_from_small_fit_residual(cfg):
@@ -202,28 +155,6 @@ def test_face_filtered_support_excludes_parallel_other_face(cfg):
     assert not unknown.valid.any()
     with pytest.raises(ValueError, match='support_face_ids'):
         map_reference_paths(path, cloud, cfg, support_face_ids=labels[:-1])
-
-
-def test_pose_splits_and_rejected_samples_are_synchronized(cfg):
-    points = np.array([[0., 0., .1], [.5, 0., .1], [1., 0., .1],
-                       [1., .5, .1], [1., 1., .1], [1., 1.5, .1]])
-    table = pd.DataFrame(dict(path_id='corner', sample_index=np.arange(len(points)),
-                              valid=True, segment_id=0, status='accepted'))
-    for j, axis in enumerate('xyz'):
-        table[f'mapped_{axis}_mm'] = points[:, j]
-        table[f'cad_{axis}_mm'] = points[:, j]
-        table[f'normal_{axis}'] = float(j == 2)
-    cad, scan, TC, TS = export_contact_poses(table, np.eye(4), cfg)
-    assert len(cad) > 0
-    diagnostics = table[table.valid].reset_index(drop=True)
-    assert diagnostics[['path_id', 'sample_index', 'segment_id']].equals(
-        cad[['path_id', 'sample_index', 'segment_id']])
-    assert cad.segment_id.nunique() >= 2
-    assert validate_contact_poses(cad, scan, TC, TS, np.eye(4), cfg)['passed']
-    # Re-export is idempotent even after endpoint tangent recomputation.
-    cad2, _, TC2, _ = export_contact_poses(table, np.eye(4), cfg)
-    np.testing.assert_allclose(TC, TC2)
-    assert cad.sample_index.equals(cad2.sample_index)
 
 
 def test_principal_curvature_of_paraboloid_and_rigid_rotation(cfg):

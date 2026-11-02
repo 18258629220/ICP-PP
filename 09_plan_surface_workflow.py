@@ -1,6 +1,7 @@
 """CAD-guided full scan segmentation, surface coverage and contact-axis mapping.
 
-Reuses an existing registration. Outputs are CAD/SCAN_INPUT geometry only.
+The raw scan is ROBOT_BASE. CAD-local coordinates are an internal B-rep workspace;
+all primary geometry and contact-frame deliverables use the robot base frame.
 """
 import pyexpat  # Load system expat before OCCT shared libraries.
 import os
@@ -19,9 +20,11 @@ import pandas as pd
 from pipeline_common import ROOT, assert_rigid, read_ply, xyz_of, transform_points, sha256, dump_json
 from planning.cad_topology import CadTopology
 from planning.segmentation import segment_points
-from planning.scan_mapping import map_reference_paths, export_contact_poses, validate_contact_poses, validate_mapping_config
+from planning.scan_mapping import map_reference_paths, finalize_pose_segments, validate_mapping_config
+from planning.frames import (BASE_FRAME, cad_to_base_transform, contact_poses_in_base,
+    transform_frame_table, validate_base_contact_poses, write_registration_in_base)
 from planning.surface_workflow import (validate_surface_config, build_surface_rasters,
-    boundary_distances, classify_surface_samples, target_layer_table, assign_process_regions)
+    boundary_distances, classify_surface_samples, assign_process_regions)
 
 
 def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, dest,
@@ -65,7 +68,8 @@ def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, de
         block = (segment_points(points, topology, segmentation_cfg, source_indices=source_ids)
                  if segmenter is None else segmenter.segment(points, segmentation_cfg, source_indices=source_ids))
         if write_csv:
-            block.to_csv(labels_path, index=False, mode='w' if start == 0 else 'a', header=start == 0)
+            block.assign(frame='CAD_LOCAL', source_frame=BASE_FRAME).to_csv(
+                labels_path, index=False, mode='w' if start == 0 else 'a', header=start == 0)
         for name in diagnostic_dtype.names:
             if name == 'status_code':
                 for status in block.status.unique():
@@ -100,6 +104,8 @@ def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, de
               f'support {len(source_support)}', flush=True)
     del face_labels, diagnostic, seen
     dump_json(dest/'point_diagnostics_schema.json', {'source_order':'one row per original PLY vertex',
+        'source_frame':BASE_FRAME, 'uv_frame':'CAD_LOCAL', 'scalar_distances_are_frame_invariant':True,
+        'optional_csv_geometry_frame':'CAD_LOCAL',
         'status_codes':status_codes, 'geometry_method':'exact_STEP' if segmenter is None else 'face_preserving_mesh',
         'uv_method':'exact_STEP' if segmenter is None else 'triangle_interpolation_of_OCCT_face_UV',
         'physical_accuracy_verified':False})
@@ -131,14 +137,14 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
     cfg = json.loads(Path(config_path).read_text())
     scfg = json.loads(Path(surface_path).read_text())
     validate_surface_config(scfg)
-    mapping = json.loads((ROOT/'cad_mapping.example.json').read_text())
+    if cfg.get('scan_frame') != BASE_FRAME:
+        raise ValueError("Confirm scan_frame='ROBOT_BASE' for the original scan before running")
+    mapping = json.loads((ROOT/'surface_workflow.example.json').read_text())['mapping']
     mapping.update(scfg['mapping'])
     mapping['path_sampling_mm'] = scfg['coverage']['path_sampling_mm']
     validate_mapping_config(mapping)
     if not np.isfinite(mapping['scan_voxel_mm']) or mapping['scan_voxel_mm'] <= 0:
         raise ValueError('scan_voxel_mm must be positive')
-    if len(scfg['process']['layer_depths_mm']) > 1 and mapping['normal_mode'] != 'scan':
-        raise ValueError('Positive target layers require scan-derived normals')
     dest = Path(dest).resolve()
     if dest.exists() and any(dest.iterdir()):
         raise FileExistsError('Use a new empty run directory; preserve previous results')
@@ -159,7 +165,9 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
     dest.mkdir(parents=True, exist_ok=True)
     start = time.perf_counter()
     dump_json(dest/'run_state.json', {'status': 'running', 'stage': 'topology',
-                                     'execution_allowed': False})
+                                     'output_frame':BASE_FRAME, 'execution_allowed': False})
+    registration = write_registration_in_base(upstream,cfg,dest=dest)
+    base_from_cad = cad_to_base_transform(transform)
     raw, meta = read_ply(scan_path)
     if len(meta['elements']) != 1:
         raise ValueError('Input scan must contain only vertices')
@@ -169,8 +177,12 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
         angular_deflection_rad=cfg['mesh_angular_deflection_rad']) if cache else
         CadTopology.from_step(step, linear_deflection_mm=cfg['mesh_linear_deflection_mm'],
                              angular_deflection_rad=cfg['mesh_angular_deflection_rad']))
-    dump_json(dest/'face_topology.json', topology.catalog)
-    topology.save_mesh(dest/'cad_face_mesh.npz')
+    dump_json(dest/'face_topology.json', {**topology.catalog, 'geometry_frame':'CAD_LOCAL',
+        'output_frame':BASE_FRAME, 'T_CAD_to_BASE':base_from_cad.tolist()})
+    np.savez_compressed(dest/'cad_face_mesh_BASE.npz',
+        vertices=transform_points(topology.vertices,base_from_cad),triangles=topology.triangles,
+        triangle_face_ids=topology.triangle_face_ids,vertex_uv=topology.vertex_uv,
+        vertex_face_ids=topology.vertex_face_ids,frame=BASE_FRAME,uv_frame='CAD_LOCAL')
     print(f'Topology: {len(topology.faces)} faces; segmenting {len(raw)} original points', flush=True)
     dump_json(dest/'run_state.json', {'status': 'running', 'stage': 'segmentation',
               'source_points': len(raw), 'execution_allowed': False})
@@ -184,6 +196,9 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
         record = json.loads((previous/'segmentation_summary.json').read_text())
         if record['input_sha256'] != hashes or record['segmentation_config'] != scfg['segmentation'] or record['voxel_mm'] != mapping['scan_voxel_mm']:
             raise ValueError('Reused segmentation does not match inputs/configuration')
+        # Older row-aligned segmentation caches were also computed in CAD.
+        if record.get('support_frame', 'CAD_LOCAL') != 'CAD_LOCAL':
+            raise ValueError('Segmentation support must use the internal CAD frame')
         arrays = np.load(previous/'segmentation_support.npz', allow_pickle=False)
         segmented = {**record, **{key: arrays[key] for key in arrays.files}}
         segmented['compact_segmentation'] = pd.DataFrame(record['compact_segmentation'])
@@ -198,7 +213,8 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
         record = {k:v for k,v in segmented.items() if k not in
                   ['support_points','support_faces','support_source_indices','support_uv','compact_segmentation']}
         record.update(input_sha256=hashes, segmentation_config=scfg['segmentation'],
-            voxel_mm=mapping['scan_voxel_mm'], compact_segmentation=segmented['compact_segmentation'].to_dict('records'))
+            voxel_mm=mapping['scan_voxel_mm'], support_frame='CAD_LOCAL', source_frame=BASE_FRAME,
+            compact_segmentation=segmented['compact_segmentation'].to_dict('records'))
         dump_json(dest/'segmentation_summary.json', record)
         label_dir = dest
     support_points, support_faces = segmented['support_points'], segmented['support_faces']
@@ -222,6 +238,7 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
         # Preserve full point labels/catalog even if no face supports a path.
         dump_json(dest/'summary.json', {'status': 'no_supported_faces', 'source_points': len(raw),
                   'segmentation_status_counts': segmented['status_counts'],
+                  'output_frame':BASE_FRAME, 'raw_scan_xyz_transformed':False,
                   'execution_allowed': False})
         dump_json(dest/'resolved_config.json', {'mapping': mapping, **{k:v for k,v in scfg.items() if k != 'mapping'}})
         _manifest(dest, hashes, transform_path, timing)
@@ -230,7 +247,8 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
     reference = pd.DataFrame([{'path_id': p['path_id'], 'sample_index': i, 'face_id': int(p['face_ids'][i]),
         'u': p['uv'][i,0], 'v': p['uv'][i,1], **dict(zip(['x_mm','y_mm','z_mm'], xyz))}
         for p in paths for i, xyz in enumerate(p['points_C'])])
-    reference.to_csv(dest/'cad_coverage_reference.csv', index=False)
+    reference['frame']='CAD'
+    transform_frame_table(reference,base_from_cad,diagnostics=False).to_csv(dest/'cad_reference_BASE.csv', index=False)
     dump_json(dest/'coverage_sampling.json', coverage)
     before = time.perf_counter()
     table = map_reference_paths(paths, support_points, mapping, support_face_ids=support_faces)
@@ -242,36 +260,25 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
         table.loc[rejected, 'status'] = 'geometric_edge_or_roi_protection'
         # Unknown removal allowance must not remove supported contact geometry.
         # Conversely, rejected edge/ROI samples must split the exported strokes.
-        from planning.scan_mapping import finalize_pose_segments
         table = finalize_pose_segments(table,mapping)
     table = assign_process_regions(table, topology, scfg)
-    table.to_csv(dest/'surface_field.csv', index=False)
-    checks_by_layer, counts = [], []
-    main_cad = None
-    for layer, depth in enumerate(scfg['process']['layer_depths_mm']):
-        layer_dir = dest/f'layer_{layer:03d}'
-        layer_dir.mkdir()
-        targets = target_layer_table(table, depth, scfg)
-        cad, scan, TC, TS = export_contact_poses(targets, transform, mapping)
-        checks = validate_contact_poses(cad, scan, TC, TS, transform, mapping)
-        targets.to_csv(layer_dir/'path_mapping_diagnostics.csv', index=False)
-        cad.to_csv(layer_dir/'tool_axis_poses_CAD.csv', index=False)
-        scan.to_csv(layer_dir/'tool_axis_poses_SCAN.csv', index=False)
-        checks = validate_contact_poses(pd.read_csv(layer_dir/'tool_axis_poses_CAD.csv'),
-            pd.read_csv(layer_dir/'tool_axis_poses_SCAN.csv'), TC, TS, transform, mapping)
-        np.savez_compressed(layer_dir/'tool_axis_transforms.npz', T_C_contact=TC, T_S_contact=TS,
-                            T_scan_to_CAD=transform)
-        checks_by_layer.append(checks)
-        if layer == 0:
-            main_cad = cad
-            contact_keys = ['path_id','sample_index','segment_id','face_id','u','v',
-                'x_mm','y_mm','z_mm',*[f'tool_{axis}_{c}' for axis in 'xyz' for c in 'xyz'],
-                'qx','qy','qz','qw','normal_source','position_reference','frame','execution_allowed']
-            contact_keys = [key for key in contact_keys if key in cad]
-            cad[contact_keys].to_csv(dest/'contact_poses_CAD.csv',index=False)
-            scan[contact_keys].to_csv(dest/'contact_poses_SCAN.csv',index=False)
-        counts.append({'layer': layer, 'depth_mm': depth, 'poses': len(cad),
-                       'segments': int(cad.segment_id.nunique()), 'status': 'geometric_preview'})
+    table=finalize_pose_segments(table,mapping)
+    transform_frame_table(table,base_from_cad).to_csv(dest/'surface_field_BASE.csv',index=False)
+    cad=table.loc[table.valid].copy().reset_index(drop=True)
+    for axis in 'xyz':
+        cad[f'{axis}_mm']=cad[f'mapped_{axis}_mm']
+    cad['frame']='CAD'
+    cad['position_reference']='surface_contact_point'
+    cad['execution_allowed']=False
+    base,matrices=contact_poses_in_base(cad,transform)
+    base.to_csv(dest/'contact_poses_BASE.csv',index=False)
+    checks=validate_base_contact_poses(cad,pd.read_csv(dest/'contact_poses_BASE.csv'),transform,mapping)
+    np.savez_compressed(dest/'contact_transforms_BASE.npz',T_BASE_contact=matrices,
+        T_CAD_to_BASE=base_from_cad,T_BASE_to_CAD=transform,
+        path_id=base.path_id.to_numpy(str),sample_index=base.sample_index.to_numpy(int),
+        segment_id=base.segment_id.to_numpy(int),frame=BASE_FRAME,quaternion_order='XYZW',units='mm')
+    if scfg.get('export_cad_audit',False):
+        cad.to_csv(dest/'contact_poses_CAD_audit.csv',index=False)
     timing['mapping_boundary_and_export_seconds'] = time.perf_counter()-before
     timing['total_seconds'] = time.perf_counter()-start
     report = {'status': 'completed', 'source_points': len(raw), 'support_points': len(support_points),
@@ -283,7 +290,10 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
               'mapped_samples': int(table.valid.sum()),
               'process_region_count': int(table.loc[table.region_id >= 0, 'region_id'].nunique()),
               'process_status_counts': {str(k):int(v) for k,v in table.process_status.value_counts().items()},
-              'layers': counts, 'checks': checks_by_layer, 'timing': timing,
+              'contact_poses':len(base),'contact_segments':int(base.segment_id.nunique()),
+              'checks': checks, 'registration_checks':registration['validation'], 'timing': timing,
+              'output_frame':BASE_FRAME,'input_scan_frame':BASE_FRAME,'units':'mm',
+              'raw_scan_xyz_transformed':False,
               'normal_mode': mapping['normal_mode'], 'execution_allowed': False,
               'segmentation_directory': str(label_dir.resolve()),
               'physical_accuracy_verified': False, 'area_coverage_certified': False,
@@ -294,8 +304,8 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
     _report(dest, report)
     if not skip_visuals:
         from planning.real_presentation import write_real_deliverables
-        write_real_deliverables(dest, raw, transform, topology, label_dir, main_cad, coverage, report)
-    dump_json(dest/'run_state.json', {'status': 'completed', 'execution_allowed': False})
+        write_real_deliverables(dest, raw, transform, topology, label_dir, base, coverage, report)
+    dump_json(dest/'run_state.json', {'status': 'completed', 'output_frame':BASE_FRAME, 'execution_allowed': False})
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return dest
 
@@ -318,32 +328,33 @@ def run(config_path, surface_path, dest, skip_visuals=False):
 
 def _manifest(dest, hashes, transform_path, timing):
     sources = list((ROOT/'planning').glob('*.py'))+[Path(__file__), ROOT/'surface_workflow.example.json',
-                                                   ROOT/'cad_mapping.example.json', ROOT/'pipeline_common.py']
+                                                   ROOT/'pipeline_common.py']
     dump_json(dest/'manifest.json', {'input_sha256': hashes, 'transform_path': str(transform_path),
         'source_sha256': {str(p.relative_to(ROOT)): sha256(p) for p in sources},
         'git_commit': subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT).decode().strip(),
         'git_branch': subprocess.check_output(['git','branch','--show-current'], cwd=ROOT).decode().strip(),
         'working_tree_dirty': bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT).strip()),
         'python': platform.python_version(), 'numpy': np.__version__, 'timing': timing,
-        'registration_reused': True, 'execution_allowed': False})
+        'registration_reused': True,'scan_frame':BASE_FRAME,'output_frame':BASE_FRAME,
+        'raw_scan_xyz_transformed':False, 'execution_allowed': False})
 
 
 def _report(dest, report):
-    lines = ['# CAD 型面分割、覆盖路径与刀轴映射', '',
+    lines = ['# 机器人基坐标：CAD定位、型面分割与接触路径', '',
              f"原始点 {report['source_points']}；确定面归属 {report['accepted_face_points']}。",
              f"覆盖参考路径 {report['reference_paths']} 条、样本 {report['reference_samples']}，有效映射 {report['mapped_samples']}。", '',
-             f"法向模式：{report['normal_mode']}。所有输出均为 CAD/输入扫描坐标下的几何预览。", '',
-             'scan_face_labels.csv 与原始 PLY 逐行对应，source_index 不改变；原始标量属性保留在原文件。',
-             'face_topology.json、cad_face_mesh.npz 保留 STEP 面/真实共享边/三角形/顶点 UV 的来源。',
-             'surface_field.csv 同时保留未支持、被拒绝、材料侧未确认及误差未知的位置。',
-             'layer_000 是实际拟合基体接触路径；正深度层是沿实际法向的常量偏置，需明确配置。',
+             f"法向模式：{report['normal_mode']}。所有主要几何输出使用 ROBOT_BASE，单位mm。", '',
+             '原始扫描XYZ保持不动；CAD与接触框架通过T_CAD_to_BASE进入基坐标。',
+             'contact_poses_BASE.csv 与contact_transforms_BASE.npz保存同一组接触点和完整刀轴。',
+             'CAD_in_BASE.ply是定位后的设计模型；scan_segmented_BASE.ply保留原始XYZ、标量属性和点序。',
+             'face_labels.npy等标签逐行对应原始扫描；UV始终是CAD局部曲面参数。',
+             'surface_field_BASE.csv保留支持不足、边界拒绝等诊断；reference_*也已变换到BASE。',
              '拟合曲面为局部二次/平面模型，不声称跨邻域全局 C1 连续。路径在缺口和姿态跳变处断开。',
              '行距采用采样曲面度量估计；不是全局严格覆盖或残留高度证明。',
              '误差为用户提供独立标准差的条件 RSS；不能由 ICP 残差推导绝对精度。',
-             '边界保护使用配置接触半径及误差裕度；不代表完整工具包络碰撞验证。',
-             '未涉及机器人基座标定、IK、设备执行、加工或复测闭环。', '',
-             '## 分层输出', '', '| 层 | 目标深度 mm | 位姿 | 连续段 |', '|---|---:|---:|---:|']
-    lines.extend(f"| {x['layer']} | {x['depth_mm']} | {x['poses']} | {x['segments']} |" for x in report['layers'])
+             '用户确认扫描坐标为BASE；该声明不等于独立标定精度验证。',
+             '未涉及IK、TCP标定、设备执行、加工或复测闭环。', '',
+             f"有效BASE接触位姿 {report['contact_poses']}，独立段 {report['contact_segments']}，坐标检查通过：{report['checks']['passed']}。"]
     (dest/'REPORT_zh.md').write_text('\n'.join(lines)+'\n')
 
 

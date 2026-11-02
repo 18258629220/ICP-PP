@@ -13,7 +13,6 @@ sys.path.insert(0, str(ROOT))
 cq = pytest.importorskip('cadquery')
 from planning.surface_workflow import (
     assign_process_regions, build_surface_rasters, classify_surface_samples,
-    target_layer_table,
 )
 
 
@@ -82,20 +81,6 @@ def test_normal_uncertainty_cannot_substitute_for_boundary_position_bound(cfg):
     result = classify_surface_samples(_samples(), np.full(5, 10.), cfg)
     assert not result.process_eligible.any()
     assert result.process_status.eq('boundary_uncertainty_unknown').all()
-
-
-def test_positive_layers_reject_overcut_and_keep_lost_samples_as_gaps(cfg):
-    cfg['process']['material_side_confirmed'] = True
-    table = _samples((.4, .4, .12, .4, .4))
-    table = classify_surface_samples(table, np.full(5, 10.), cfg)
-    target = target_layer_table(table, .2, cfg)
-    assert target.valid.tolist() == [True, True, False, True, True]
-    np.testing.assert_allclose(target.loc[target.valid, 'mapped_z_mm'], .2)
-    assert target.iloc[1].segment_id != target.iloc[3].segment_id
-    assert target.iloc[2].segment_id == -1
-    assert np.isnan(target.iloc[2].mapped_z_mm)
-    # A further layer below the available nominal-CAD allowance cannot survive.
-    assert not target_layer_table(table, .5, cfg).valid.any()
 
 
 def _region_candidates(face, points, face_id=0, normal=(0., 0., 1.)):

@@ -3,6 +3,26 @@
   "point_diagnostics_csv": false,
   "exact_audit_samples": 400,
   "mapping": {
+    "approach_outward_C": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "scan_voxel_mm": 0.4,
+    "search_radius_mm": 2.5,
+    "tangent_radius_mm": 1.8,
+    "max_normal_offset_mm": 1.0,
+    "min_support_points": 12,
+    "min_tangent_spread_mm": 0.18,
+    "max_support_gap_mm": 0.65,
+    "layer_gap_mm": 0.35,
+    "secondary_layer_fraction": 0.3,
+    "fit_degree": 2,
+    "max_fit_rms_mm": 0.25,
+    "max_normal_change_deg": 20.0,
+    "max_point_jump_mm": 1.2,
+    "max_offset_step_mm": 0.4,
+    "max_pose_step_deg": 25.0,
     "normal_mode": "scan",
     "scan_sigma_mm": null,
     "registration_sigma_mm": null,
@@ -45,7 +65,9 @@
     "following_error_bound_mm": 0.0,
     "boundary_position_bound_mm": null,
     "uncertainty_multiplier": 2.0,
-    "layer_depths_mm": [0.0],
+    "layer_depths_mm": [
+      0.0
+    ],
     "region_connection_radius_mm": 1.6,
     "minimum_region_samples": 4,
     "region_normal_cosine": 0.85,
