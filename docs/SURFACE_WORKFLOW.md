@@ -74,11 +74,14 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
 全分辨率分割采用带 CAD 面号来源的网格加速查询，距离、竞争、边界或未离散面附近
 会拒绝自动归属。`face_labels.npy` 和 `point_diagnostics.npy` 与原始行号一一对应；
 距离和 UV 等标量不会因坐标旋转改变。拒绝标签 -1，未处理标签 -2。
-默认不导出数 GB 的逐点 CSV。
+默认不导出数 GB 的逐点 CSV。开启 `point_diagnostics_csv` 时，逐点投影 CSV 明确标记
+`frame=CAD_LOCAL` 和 `source_frame=ROBOT_BASE`，用于内部型面审核。
 
 `exact_face_audit.csv/json` 将接受和拒绝样本与精确 STEP 投影对照；抽查一致性不等于
-全体标签的真实正确率。`face_topology.json` 和 `cad_face_mesh.npz` 保存面、共享边、
-孔洞、顶点 UV 和网格来源；`mesh_status=partial` 时未离散面仍有明确记录。
+全体标签的真实正确率。`face_topology.json` 保存面、共享边和孔洞来源；
+`cad_face_mesh_BASE.npz` 保存基坐标网格顶点、三角形面号与 CAD 曲面 UV。
+内部缓存中的网格与 `segmentation_support.npz` 支持点仍在 CAD 局部坐标；
+`mesh_status=partial` 时未离散面仍有明确记录。
 
 实际接触点和刀轴法向来自同一局部扫描曲面，保留设计与扫描法向诊断。
 邻域不跨已归属型面，支持不足、多层歧义、外推和姿态不连续会拒绝或拆段。
