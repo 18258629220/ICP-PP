@@ -20,6 +20,9 @@ from planning.surface_workflow import (
 @pytest.fixture
 def cfg():
     value = json.loads((ROOT/'surface_workflow.example.json').read_text())
+    value['coverage'].update(face_ids=[0], line_spacing_mm=1., path_sampling_mm=.5)
+    value['process']['mode'] = 'allowance_analysis'
+    value['process']['effective_contact_radius_mm'] = .5
     value['process']['boundary_position_bound_mm'] = 0.
     return value
 

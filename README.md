@@ -1,11 +1,11 @@
 # ICP-PP：CAD 引导的真实工件点云分割与磨抛规划
 
 本项目围绕五个步骤处理真实工件：CAD—扫描配准、CAD 型面拓扑、点云型面分割、
-表面磨抛覆盖路径，以及接触点与刀轴映射。输入为毫米 STEP 与扫描 PLY，
+主要型面整体随形磨抛覆盖路径，以及接触点与刀轴映射。输入为毫米 STEP 与扫描 PLY，
 输出保留原始点对应关系和被拒绝区域，并提供可离线查看的真实工件三维结果。
 
-当前范围到 CAD/输入扫描坐标系下的几何规划；输出 `execution_allowed=False`。
-实际设备绝对精度、磨头接触工艺及机器人执行需另行验证。
+当前交付是 CAD/输入扫描坐标系下的接触点与刀轴位姿，不依赖磨头型号。
+所有输出保留 `execution_allowed=False`；实际设备绝对精度和机器人执行另行验证。
 
 ## 安装
 
@@ -46,13 +46,18 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
 
 | 结果 | 用途 |
 |---|---|
-| `face_topology.json` | CAD 面、孔洞与共享边目录；STEP 面号不同于三角形编号 |
-| `scan_face_labels.csv` / `face_labels.npy` | 原始扫描逐点面标签、对应关系与不确定区域 |
-| `surface_field.csv` | 实际表面拟合、法向偏差、支持质量及工艺区域 |
-| `layer_*/CAD_scan_paths.html` | 可旋转的工件、参考路径、实际表面路径与被拒绝位置 |
-| `layer_*/tool_axis_poses_CAD.csv` | 接触点 XYZ、刀轴方向、四元数及示例球心 |
-| `REPORT_zh.md` / `summary.json` | 本次真实输入的处理数量、拒绝原因和数值检查 |
-| `manifest.json` / `run_state.json` | 输入与源码版本、运行状态和是否完整完成 |
+| `REAL_WORKPIECE.html` | 首选结果：真实工件分割、主要型面、随形覆盖路径与刀轴的交互三维图 |
+| `real_overview.png` | 真实工件分割与规划总览图 |
+| `contact_poses_CAD.csv` / `contact_poses_SCAN.csv` | 接触点 XYZ、刀轴三轴及四元数；两种坐标系表达同一批位姿 |
+| `point_diagnostics.npy` / `face_labels.npy` | 与原始 PLY 逐行对应的诊断与面标签，可按需读取，不生成巨大 CSV |
+| `exact_face_audit.csv` / `.json` | 抽样点与精确 STEP 曲面的对照检查 |
+| `face_topology.json` / `cad_face_mesh.npz` | CAD 面、孔洞、邻接及网格面号来源 |
+| `surface_field.csv` | 路径附近实际表面拟合、法向、支持质量及拒绝原因 |
+| `REPORT_zh.md` / `summary.json` | 真实输入的处理数量、主要型面、有效路径与数值检查 |
+| `manifest.json` / `run_state.json` | 输入和源码版本、运行状态和是否完整完成 |
+
+全分辨率分割使用保留 CAD 面号的三角网格加速；精确 STEP 对照抽查单独记录，
+不把网格面标签说成每个点都经过精确曲面求解。逐点 CSV 默认关闭，完整 NPY 仍保留全部原始行。
 
 未扫描区域保留为未知；不能理解为零偏差或无需加工。拟合残差、ICP 收敛和
 数值往返误差不能代替独立的实物精度验证，不能据此宣称达到 ≤0.2 mm。
@@ -74,7 +79,7 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python -m pytest -q tests
 ## 几何和版本约定
 
 变换固定为 `p_C = R @ p_S + t`，行向量形式为 `p_C = p_S @ R.T + t`。
-欧氏距离、法向偏差和工艺去除深度分别记录；未经确认的法向正负不能直接解释为余量。
+欧氏距离、法向偏差与接触点坐标分别记录；未经确认的法向正负不能直接解释为余量。
 每个实际运行记录输入哈希和代码版本，原始数据不因版本追踪而公开。
 修改、验证、提交和同步遵循 [PROJECT_RULES.md](PROJECT_RULES.md)。
 

@@ -1,109 +1,92 @@
-# CAD 型面分割、覆盖路径与刀轴映射
+# 真实工件型面分割、随形覆盖路径与接触位姿
 
-本版本接续用户已有的 08 精确曲线映射，补齐前述方案第 1–5 步的几何工作流。
-第 6 步机器人基座/逆解/运动规划、第 7 步加工与复测闭环不在本次范围。
-输出始终 `execution_allowed=False`。长度均为 mm，变换仍为 `p_C=R@p_S+t`。
+本流程接续已有 CAD—扫描配准，完成真实工件主要型面的分割、整体随形磨抛路径和
+接触点/刀轴位姿。当前先不引入磨头模型，用户主要查看真实工件图和接触位姿表。
+机器人基座、逆解、设备执行及加工复测闭环不在本轮范围。长度均为 mm。
 
-## 五步处理链路
+## 真实数据处理链路
 
-1. 保留 CAD 面、共享边、孔洞和三角网格面号来源。
-2. 用配准后的真实扫描建立点到 CAD 型面的对应，保留歧义与未覆盖区域。
-3. 在同型面内拟合实际表面位置、法向和曲率。
-4. 在有扫描支持的型面上生成覆盖路径，处理孔洞、边界和保护区。
-5. 将参考接触点映射至实际表面，输出接触点、刀轴及完整姿态。
+1. 读取 STEP 面、共享边、孔洞和网格面号来源。
+2. 将全部原始扫描点对齐到 CAD，分块生成面标签和质量诊断。
+3. 从有扫描支持的主要型面内拟合实际表面位置、法向和曲率。
+4. 在主要型面上布置覆盖往复线，裁剪孔洞、边界及缺测范围。
+5. 将接触点与刀轴同步映射到实际表面，导出 CAD/输入扫描坐标下的位姿。
 
-## 运行真实数据
-
-先完成现有配准；本流程不重新拟合、不改变 `T_scan_to_CAD.npy`。
-校验原始 STEP/扫描哈希及保存的变换，输入改变时拒绝复用旧配准。
+同批输入的 STEP、扫描和配准矩阵通过 SHA-256 核对后才复用；不重新拟合或改变
+`T_scan_to_CAD.npy`。源文件与本机配置留在本地，运行目录不得覆盖旧结果。
 
 ```bash
-cp surface_workflow.example.json surface_workflow.local.json
-# 根据实际几何与工艺编辑本机文件，优先指定 coverage.face_ids 控制覆盖范围。
 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
   09_plan_surface_workflow.py --config config.json \
   --surface-config surface_workflow.local.json \
-  --run-dir output/surface_workflow/my_new_run
+  --run-dir output/real_surface_run
 ```
 
-运行目录必须为空。真实输入、配置、原始点标签、图像与路径结果均留在本地忽略目录。
-不要把真实面号/工艺方案写进公开示例配置。
+首次使用从两个 `.example.json` 复制本机配置；已有配置直接编辑。
+`coverage.face_ids` 指定主要型面范围；自动候选也须结合本次分割和扫描覆盖判断。
+`line_spacing_mm` 控制相邻覆盖线的名义物理间隔，`path_sampling_mm` 控制沿线采样。
+行距采用采样曲面度量估计，不声称严格等残留高度或实际工具接触面积覆盖。
 
-`coverage.face_ids=null` 对每个扫描支持足够的面建立覆盖线；不是确认生产加工区。
-复杂模型可能超过路径样本上限，此时明确报错，保留已经写出的分割结果。
-应指定型面范围或调整采样，而不是静默截断。分割依然处理全部原始点；
-`segmentation_chunk_points` 限制每块诊断表规模，不能改变点序或跳过点。
+## 先看最终效果
 
-## 输出关联
-
-| 文件 | 含义 |
+| 文件 | 如何理解 |
 |---|---|
-| `face_topology.json` | 面/共享边/孔洞/邻接与导入遍历编号 |
-| `cad_face_mesh.npz` | 独立按面离散的顶点/三角形、triangle_face_ids、vertex_uv、vertex_face_ids |
-| `scan_face_labels.csv` | 与输入 PLY 逐行对应的 source_index、面标签、UV、投影、偏差、边界距离及拒绝原因 |
-| `face_labels.npy` | 全点 int32 面标签，拒绝点 -1，分块写入 |
-| `support_provenance.csv` | 拟合支持点到原始行号的来源；每面/体素保留真实点，不跨薄壁平均 |
-| `cad_coverage_reference.csv` | 所有参考路径样本及精确 CAD UV |
-| `coverage_sampling.json` | 每面线数、采样度量行距及非认证标记 |
-| `surface_field.csv` | 沿覆盖线采样的实际局部型面、法向、误差、保护/余量/未知及 region_id |
-| `layer_*/path_mapping_diagnostics.csv` | 每层全部样本与最终有效性；断点不会被连回 |
-| `layer_*/tool_axis_poses_CAD.csv` / `SCAN.csv` | 接触点、工具三轴、XYZW 四元数、示例球心 |
-| `layer_*/tool_axis_transforms.npz` | CAD/输入扫描坐标接触框架矩阵 |
-| `summary.json` / `manifest.json` | 统计、数值检查、输入与代码哈希、commit/dirty 状态及耗时 |
+| `REAL_WORKPIECE.html` | 真实工件交互总览，查看型面着色、规划范围、随形路径和刀轴 |
+| `real_overview.png` | 总览静态图，可直接查看与对比 |
+| `contact_poses_CAD.csv` | CAD 坐标系中的接触点和完整刀轴位姿 |
+| `contact_poses_SCAN.csv` | 同一批位姿转换到原始扫描文件坐标系 |
+| `REPORT_zh.md` / `summary.json` | 本轮输入、处理数量、有效路径及拒绝原因 |
 
-`surface_field.csv` 是覆盖线上的采样场，不是每个 UV 位置都有可信数据的连续全域曲面。
-`face_id=-1` 不等于没有缺陷；置信度只是几何诊断分数，未经概率标定。
-STEP 面号不能用作原有 clean mesh 的三角形索引；新 NPZ 自己保存对应关系。
-CAD UV 不等于 Open3D 的三角形重心坐标。
-个别有效精确面可能没有 OCCT 三角网格；目录会记录 `mesh_status=partial`、
-`mesh_warnings` 与未离散面号，精确面仍参与分割，后续面号不会重新编号。
-此时新离散网格不是完整几何包络，不能用作完整碰撞或覆盖证明。
-`run_state.json` 记录运行中、失败或完成；中断时 NPY 未处理行保持 -2，拒绝行是 -1。
+接触位姿表的 `x_mm/y_mm/z_mm` 是表面接触点；工具三轴中 +Z 指向工件，+X 沿路径
+在切平面上的前进方向，+Y 构成右手系。`qx/qy/qz/qw` 为 XYZW 四元数。
+这些是同一个接触框架的不同表达，不是磨头球心、法兰或已标定 TCP。
 
-## 参数与工艺判定
+`segment_id` 改变时表示路径断开，不能直接跨孔洞、缺测或姿态跳变连接。
+输出始终 `execution_allowed=False`，不含机器人指令。
 
-`mapping.normal_mode=scan` 用同一鲁棒局部高度曲面的导数生成刀轴；`cad` 保持旧模式。
-两者均保存 CAD/扫描法向。曲率通过第一/第二基本形式计算，包含非零坡度修正。
-缺测、多层、外推、噪声或姿态不连续会拒绝或拆段，邻域只允许已归属到同一 CAD 面的点。
+## 全点分割与精确曲面对照
 
-`scan_sigma_mm`、`registration_sigma_mm` 是外部提供的沿 CAD 法向标准不确定度，
-与局部预测项按独立条件 RSS 合成。默认 null，不会从很小拟合残差推断精度。
-该预算没有姿态协方差、杆臂效应、相关误差和模型偏差，不能证明真实绝对精度。
+完整分辨率标签使用带 CAD 面号来源的三角网格加速查询，结合距离、面竞争、
+法向与边界等条件筛查。此方法对所有原始点输出记录，但不等于所有点都执行了精确
+STEP 曲面投影。网格弦差、未离散面及边界近似应结合对照结果评估。
 
-法向不确定度不等于切向边界误差。`process.boundary_position_bound_mm` 需独立提供
-边界空间误差上界；默认 null。边界保护裕度为配置接触半径、保护间隙、该上界及
-跟随误差上界之和。接触半径是工艺输入，与 `example_ball_radius_mm` 的示例球半径不同。
-该保护只是几何预览，尚无完整磨头/刀杆包络和接触变形证明。
+`exact_face_audit.csv` / `.json` 单独记录抽样点的网格标签与精确 STEP 投影对照，
+抽查包括接受和拒绝位置。它验证当前样本的一致性，不直接给出全部点的真实正确率。
 
-只有外部法向误差、边界误差及 `material_side_confirmed=true` 明确时，偏差下界超过
-`allowance_threshold_mm` 且通过保护检查的样本才标成 allowance_candidate。
-否则保留 uncertain_metrology、material_side_unconfirmed、boundary_uncertainty_unknown
-等状态。禁止把字符串 "false" 当材料侧确认。
+| 支撑文件 | 含义 |
+|---|---|
+| `face_labels.npy` | 全点 int32 面标签，与原始 PLY 行号一一对应；拒绝点 -1、未处理点 -2 |
+| `point_diagnostics.npy` | 全点结构化诊断，与原始 PLY 保持相同行序 |
+| `point_diagnostics_schema.json` | NPY 字段、状态码及坐标约定 |
+| `segmentation_summary.json` | 全体处理计数、参数、输入哈希与支持采样记录 |
+| `support_provenance.csv` | 局部曲面支持点对应的原始行号，不跨薄壁平均 |
+| `face_topology.json` / `cad_face_mesh.npz` | 精确面、共享边、孔洞及网格面号/逐顶点曲面 UV |
+| `surface_field.csv` | 覆盖线附近局部实际型面、法向及映射诊断 |
 
-`protected_uv_boxes` 可配置 `{face_id, bounds:[umin,umax,vmin,vmax]}`，
-保护区域覆盖余量判定。区域按同面、位置距离、法向一致性及精确 UV 裁剪可见性连接；
-小于 `minimum_region_samples` 的孤立区域保留诊断，不自动加工。
-区域拓扑精度受路径采样和连接半径限制，不能识别采样间未观测的小缺陷。
+逐点 CSV 默认不导出，避免生成数 GB 文本；全部原始行仍完整保存在 NPY。
+必要时可启用 `point_diagnostics_csv`，但主要结果不依赖 CSV。
+`segmentation_chunk_points` 控制每块内存规模，不改变点序或跳过点。
+配置 `reuse_segmentation_dir` 时只复用输入哈希、分割参数和支持采样参数一致的记录；
+`cad_cache_dir` 的拓扑缓存也随输入和离散参数核对。
 
-`layer_depths_mm` 必须从 0 严格递增，0 层表示当前拟合基体。正层仅在 scan 法向模式
-及材料侧确认后生成沿实际法向的常量偏置，并要求偏差下界覆盖深度、边界增加深度裕度、
-局部 `depth*max_abs_principal_curvature<0.5`。这只是局部平行曲面正则性检查；
-未定义实际单次去除能力、力、进给和工具整体碰撞，不能直接用于设备。
+STEP 面号不同于三角形编号；CAD UV 不等于 Open3D 三角形重心坐标。
+`mesh_status=partial` 表示某些精确面未产生三角网格，目录保留其面号与警告；
+此时不能把离散网格称为完整几何包络。
 
-## 真实运行验收
+## 表面与刀轴判定
 
-先检查 `manifest.json` 的 STEP、扫描及配准矩阵哈希，确认所有文件来自同一轮输入。
-再检查 `run_state.json` 为 completed，而不是 running/failed；中断结果不能当作全量输出。
+`mapping.normal_mode=scan` 使用同一局部拟合曲面的高度与导数计算实际接触点和法向，
+避免位置已随形而刀轴仍沿用设计法向。CAD 与扫描法向分开保留；邻域限制在同一型面。
+支持不足、多层歧义、外推或不连续位置会拒绝或拆段，不用补点假装已扫描。
 
-验收主要看三方面：
+外部扫描/配准不确定度可以另行配置；未提供时保留未知，不能从很小的局部残差反推出
+设备绝对精度。当前目标是表面随形的几何覆盖，先不依据未经确认的正负偏差自动下切。
 
-- 分割：全体原始点都有对应记录，报告确定归属、歧义、边界和离群数量；三维图按型面着色。
-- 路径：每段都在有支持的范围内；孔洞、缺测和不连续处断开，保留未规划区域。
-- 位姿：接触点贴合局部实际型面，刀轴与所选表面法向一致，坐标往返和 CSV/矩阵检查通过。
+## 运行验收
 
-未经独立参考测量，不把“成功归属比例”当作分割正确率，也不把局部拟合残差当成设备精度。
-工具接触半径、正式工艺区域和去除深度须在实际工艺条件下确认。
+先确认 `manifest.json` 的输入和代码版本，以及 `run_state.json=completed`。
+然后检查全点标签数量与原始 PLY 一致、主要型面范围合理、精确曲面对照差异、
+缺测/孔洞处路径断开、有效接触点贴合扫描、刀轴与拟合法向一致，以及两坐标系往返检查。
 
-人工平板/圆柱工件生成器和相关端到端演示已删除。只保留点序/属性、孔洞/薄壁、
-法向/坐标和分块一致性等必要检查，开发重点放在真实数据的处理质量与可视化结果。
-依赖仍使用现有环境，不引入 ROS、机器人模型或新训练网络。
+未经独立参考测量，不把成功归属比例称为分割正确率，也不宣称已达到 ≤0.2 mm。
+人工平板/圆柱生成器及其端到端演示已移除，只保留必要的点序、孔洞/薄壁与位姿保障检查。

@@ -25,7 +25,7 @@ from planning.surface_workflow import (validate_surface_config, build_surface_ra
 
 
 def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, dest,
-                        chunk_points=20000):
+                        chunk_points=20000, segmenter=None, write_csv=True):
     """Stream row-aligned full-resolution labels; retain actual source support.
 
     Only one XYZ block and one diagnostic DataFrame are resident at a time.
@@ -48,20 +48,37 @@ def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, de
                                             dtype=np.int32, shape=(len(raw),))
     face_labels[:] = -2  # Unprocessed rows in an interrupted run, distinct from rejected=-1.
     face_labels.flush()
+    diagnostic_dtype = np.dtype([('face_id','<i4'), ('candidate_face_id','<i4'),
+        ('u','<f8'), ('v','<f8'), ('distance_mm','<f4'), ('signed_deviation_mm','<f4'),
+        ('boundary_distance_mm','<f4'), ('confidence','<f4'), ('status_code','<u2')])
+    diagnostic = np.lib.format.open_memmap(dest/'point_diagnostics.npy', mode='w+',
+                                         dtype=diagnostic_dtype, shape=(len(raw),))
+    status_codes = {}
     status_counts, face_counts = Counter(), Counter()
-    seen, source_support, support_faces = set(), [], []
+    seen, source_support, support_faces, support_uv = set(), [], [], []
     for start in range(0, len(raw), chunk_points):
         end = min(start+chunk_points, len(raw))
         points = transform_points(xyz_of(raw[start:end]), transform)
         if not np.isfinite(points).all():
             raise ValueError(f'Nonfinite scan positions in source rows {start}:{end}')
-        block = segment_points(points, topology, segmentation_cfg,
-                               source_indices=np.arange(start, end, dtype=np.int64))
-        block.to_csv(labels_path, index=False, mode='w' if start == 0 else 'a', header=start == 0)
+        source_ids = np.arange(start, end, dtype=np.int64)
+        block = (segment_points(points, topology, segmentation_cfg, source_indices=source_ids)
+                 if segmenter is None else segmenter.segment(points, segmentation_cfg, source_indices=source_ids))
+        if write_csv:
+            block.to_csv(labels_path, index=False, mode='w' if start == 0 else 'a', header=start == 0)
+        for name in diagnostic_dtype.names:
+            if name == 'status_code':
+                for status in block.status.unique():
+                    if status not in status_codes:
+                        status_codes[status] = len(status_codes)
+                diagnostic[name][start:end] = block.status.map(status_codes).to_numpy(np.uint16)
+            else:
+                diagnostic[name][start:end] = block[name].to_numpy()
         labels = block.face_id.to_numpy(np.int32)
         face_labels[start:end] = labels
         status_counts.update({str(k): int(v) for k,v in block.status.value_counts().items()})
         valid = block.valid.to_numpy(bool)
+        block_uv = block[['u','v']].to_numpy(float)
         face_counts.update({int(k): int(v) for k,v in block.loc[valid, 'face_id'].value_counts().items()})
         ids = np.flatnonzero(valid)
         if len(ids):
@@ -76,10 +93,16 @@ def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, de
                     seen.add(key)
                     source_support.append(start+int(ids[local]))
                     support_faces.append(int(labels[ids[local]]))
+                    support_uv.append(block_uv[ids[local]])
         face_labels.flush()
+        diagnostic.flush()
         print(f'Segmentation rows {end}/{len(raw)}; accepted {sum(face_counts.values())}; '
               f'support {len(source_support)}', flush=True)
-    del face_labels, seen
+    del face_labels, diagnostic, seen
+    dump_json(dest/'point_diagnostics_schema.json', {'source_order':'one row per original PLY vertex',
+        'status_codes':status_codes, 'geometry_method':'exact_STEP' if segmenter is None else 'face_preserving_mesh',
+        'uv_method':'exact_STEP' if segmenter is None else 'triangle_interpolation_of_OCCT_face_UV',
+        'physical_accuracy_verified':False})
     source_support = np.asarray(source_support, dtype=np.int64)
     support_faces = np.asarray(support_faces, dtype=np.int32)
     support_points = np.empty((len(source_support), 3), dtype=float)
@@ -100,6 +123,7 @@ def stream_segment_scan(raw, transform, topology, segmentation_cfg, voxel_mm, de
             'face_counts': dict(sorted(face_counts.items())),
             'support_points': support_points, 'support_faces': support_faces,
             'support_source_indices': source_support, 'compact_segmentation': compact,
+            'support_uv': np.asarray(support_uv,float).reshape(-1,2),
             'chunk_points': chunk_points}
 
 
@@ -139,23 +163,61 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
     raw, meta = read_ply(scan_path)
     if len(meta['elements']) != 1:
         raise ValueError('Input scan must contain only vertices')
-    topology = CadTopology.from_step(step, linear_deflection_mm=cfg['mesh_linear_deflection_mm'],
-                                    angular_deflection_rad=cfg['mesh_angular_deflection_rad'])
+    cache = scfg.get('cad_cache_dir')
+    topology = (CadTopology.from_cache(step, ROOT/cache,
+        linear_deflection_mm=cfg['mesh_linear_deflection_mm'],
+        angular_deflection_rad=cfg['mesh_angular_deflection_rad']) if cache else
+        CadTopology.from_step(step, linear_deflection_mm=cfg['mesh_linear_deflection_mm'],
+                             angular_deflection_rad=cfg['mesh_angular_deflection_rad']))
     dump_json(dest/'face_topology.json', topology.catalog)
     topology.save_mesh(dest/'cad_face_mesh.npz')
     print(f'Topology: {len(topology.faces)} faces; segmenting {len(raw)} original points', flush=True)
     dump_json(dest/'run_state.json', {'status': 'running', 'stage': 'segmentation',
               'source_points': len(raw), 'execution_allowed': False})
     before = time.perf_counter()
-    segmented = stream_segment_scan(raw, transform, topology, scfg['segmentation'],
-        mapping['scan_voxel_mm'], dest, scfg.get('segmentation_chunk_points', 20000))
+    from planning.fast_segmentation import MeshFaceSegmenter
+    segmenter = MeshFaceSegmenter(topology, boundary_sampling_mm=scfg.get('boundary_sampling_mm', .4),
+        boundary_cache_dir=None if not cache else ROOT/cache/'boundaries')
+    previous = scfg.get('reuse_segmentation_dir')
+    if previous:
+        previous = ROOT/previous
+        record = json.loads((previous/'segmentation_summary.json').read_text())
+        if record['input_sha256'] != hashes or record['segmentation_config'] != scfg['segmentation'] or record['voxel_mm'] != mapping['scan_voxel_mm']:
+            raise ValueError('Reused segmentation does not match inputs/configuration')
+        arrays = np.load(previous/'segmentation_support.npz', allow_pickle=False)
+        segmented = {**record, **{key: arrays[key] for key in arrays.files}}
+        segmented['compact_segmentation'] = pd.DataFrame(record['compact_segmentation'])
+        segmented['face_counts'] = {int(k):int(v) for k,v in record['face_counts'].items()}
+        label_dir = previous
+    else:
+        segmented = stream_segment_scan(raw, transform, topology, scfg['segmentation'],
+            mapping['scan_voxel_mm'], dest, scfg.get('segmentation_chunk_points', 100000),
+            segmenter=segmenter, write_csv=scfg.get('point_diagnostics_csv', False))
+        np.savez_compressed(dest/'segmentation_support.npz', **{k:segmented[k] for k in
+            ['support_points','support_faces','support_source_indices','support_uv']})
+        record = {k:v for k,v in segmented.items() if k not in
+                  ['support_points','support_faces','support_source_indices','support_uv','compact_segmentation']}
+        record.update(input_sha256=hashes, segmentation_config=scfg['segmentation'],
+            voxel_mm=mapping['scan_voxel_mm'], compact_segmentation=segmented['compact_segmentation'].to_dict('records'))
+        dump_json(dest/'segmentation_summary.json', record)
+        label_dir = dest
     support_points, support_faces = segmented['support_points'], segmented['support_faces']
     timing = {'segmentation_seconds': time.perf_counter()-before}
+    audit_count = int(scfg.get('exact_audit_samples', 400))
+    if audit_count > 0:
+        audit_ids = np.unique(np.linspace(0, len(raw)-1, min(audit_count,len(raw))).astype(np.int64))
+        audit_rows, audit_summary = segmenter.audit(transform_points(xyz_of(raw[audit_ids]),transform),
+            scfg['segmentation'], source_indices=audit_ids)
+        audit_rows.to_csv(dest/'exact_face_audit.csv',index=False)
+        dump_json(dest/'exact_face_audit.json',audit_summary)
+        print('Exact STEP audit:',json.dumps(audit_summary),flush=True)
     print(f"Segmentation: {segmented['accepted_face_points']}/{len(raw)} accepted; building coverage", flush=True)
     dump_json(dest/'run_state.json', {'status': 'running', 'stage': 'coverage_and_mapping',
               'source_points': len(raw), 'execution_allowed': False})
     paths, coverage = build_surface_rasters(topology, segmented['compact_segmentation'], scfg,
-                                          mapping['approach_outward_C'])
+        mapping['approach_outward_C'], support_points_C=support_points,
+        support_face_ids=support_faces, support_uv=segmented['support_uv'])
+    pd.DataFrame(coverage).to_csv(dest/'face_selection.csv',index=False)
     if not paths:
         # Preserve full point labels/catalog even if no face supports a path.
         dump_json(dest/'summary.json', {'status': 'no_supported_faces', 'source_points': len(raw),
@@ -174,9 +236,18 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
     table = map_reference_paths(paths, support_points, mapping, support_face_ids=support_faces)
     boundaries = boundary_distances(topology, table)
     table = classify_surface_samples(table, boundaries, scfg)
+    if scfg['process'].get('mode') == 'surface_following':
+        rejected = table.valid & ~table.surface_following_eligible
+        table.loc[rejected, 'valid'] = False
+        table.loc[rejected, 'status'] = 'geometric_edge_or_roi_protection'
+        # Unknown removal allowance must not remove supported contact geometry.
+        # Conversely, rejected edge/ROI samples must split the exported strokes.
+        from planning.scan_mapping import finalize_pose_segments
+        table = finalize_pose_segments(table,mapping)
     table = assign_process_regions(table, topology, scfg)
     table.to_csv(dest/'surface_field.csv', index=False)
     checks_by_layer, counts = [], []
+    main_cad = None
     for layer, depth in enumerate(scfg['process']['layer_depths_mm']):
         layer_dir = dest/f'layer_{layer:03d}'
         layer_dir.mkdir()
@@ -191,11 +262,16 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
         np.savez_compressed(layer_dir/'tool_axis_transforms.npz', T_C_contact=TC, T_S_contact=TS,
                             T_scan_to_CAD=transform)
         checks_by_layer.append(checks)
+        if layer == 0:
+            main_cad = cad
+            contact_keys = ['path_id','sample_index','segment_id','face_id','u','v',
+                'x_mm','y_mm','z_mm',*[f'tool_{axis}_{c}' for axis in 'xyz' for c in 'xyz'],
+                'qx','qy','qz','qw','normal_source','position_reference','frame','execution_allowed']
+            contact_keys = [key for key in contact_keys if key in cad]
+            cad[contact_keys].to_csv(dest/'contact_poses_CAD.csv',index=False)
+            scan[contact_keys].to_csv(dest/'contact_poses_SCAN.csv',index=False)
         counts.append({'layer': layer, 'depth_mm': depth, 'poses': len(cad),
                        'segments': int(cad.segment_id.nunique()), 'status': 'geometric_preview'})
-        if layer == 0 and not skip_visuals:
-            from planning.cad_mapping_visuals import write_mapping_visuals
-            write_mapping_visuals(layer_dir, upstream/'cad_mesh_clean.ply', support_points, paths, targets, mapping, {})
     timing['mapping_boundary_and_export_seconds'] = time.perf_counter()-before
     timing['total_seconds'] = time.perf_counter()-start
     report = {'status': 'completed', 'source_points': len(raw), 'support_points': len(support_points),
@@ -209,12 +285,16 @@ def _run(config_path, surface_path, dest, skip_visuals=False):
               'process_status_counts': {str(k):int(v) for k,v in table.process_status.value_counts().items()},
               'layers': counts, 'checks': checks_by_layer, 'timing': timing,
               'normal_mode': mapping['normal_mode'], 'execution_allowed': False,
+              'segmentation_directory': str(label_dir.resolve()),
               'physical_accuracy_verified': False, 'area_coverage_certified': False,
               'robot_planning_included': False, 'machining_feedback_included': False}
     dump_json(dest/'summary.json', report)
     dump_json(dest/'resolved_config.json', {'mapping': mapping, **{k:v for k,v in scfg.items() if k != 'mapping'}})
     _manifest(dest, hashes, transform_path, timing)
     _report(dest, report)
+    if not skip_visuals:
+        from planning.real_presentation import write_real_deliverables
+        write_real_deliverables(dest, raw, transform, topology, label_dir, main_cad, coverage, report)
     dump_json(dest/'run_state.json', {'status': 'completed', 'execution_allowed': False})
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return dest
