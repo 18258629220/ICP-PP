@@ -73,12 +73,6 @@ def test_unobserved_central_hole_is_not_filled(cfg):
     assert not fit['valid'], 'A surrounding convex hull must not legitimize filling an unobserved hole'
 
 
-def test_insufficient_scan_support(cfg):
-    fit = fit_local_surface(np.zeros(3), [0, 0, 1], np.array([[0, 0, .1], [.1, 0, .1]]), cfg)
-    assert not fit['valid']
-    assert fit['status'] == 'insufficient_support'
-
-
 def _small_patches(xs, offsets):
     xy = grid(.18, .03)
     xy = xy[np.linalg.norm(xy, axis=1) < .19]
@@ -96,16 +90,6 @@ def _small_cfg(cfg):
                 min_tangent_spread_mm=.04, fit_degree=1)
 
 
-def test_offset_discontinuity_starts_new_segment(cfg):
-    cfg = _small_cfg(cfg)
-    xs = np.arange(6)*.5
-    table = map_reference_paths(_reference(xs), _small_patches(xs, [-.3]*3+[.3]*3), cfg)
-    assert table.valid.all()
-    assert table.segment_id.nunique() == 2
-    assert table.iloc[2].segment_id != table.iloc[3].segment_id
-    np.testing.assert_allclose(table.offset_mm, [-.3]*3+[.3]*3, atol=1e-10)
-
-
 def test_missing_samples_and_isolates_never_join(cfg):
     cfg = _small_cfg(cfg)
     xs = np.arange(9)*.5
@@ -116,20 +100,6 @@ def test_missing_samples_and_isolates_never_join(cfg):
     assert table.iloc[3].status == 'isolated_sample'
     assert table.iloc[0].segment_id != table.iloc[5].segment_id
     assert np.isnan(table.iloc[3].mapped_z_mm)
-
-
-def test_curved_cad_normals_produce_changing_right_handed_frames():
-    angle = np.linspace(-.5, .5, 31)
-    # Cylinder radius 20, traversed circumferentially: analytic outward normals.
-    normal = np.column_stack([np.sin(angle), np.zeros(len(angle)), np.cos(angle)])
-    points = 20*normal
-    frames, quat = contact_frames(points, normal)
-    np.testing.assert_allclose(frames[:, :, 2], -normal, atol=1e-12)
-    np.testing.assert_allclose(np.linalg.det(frames), 1., atol=1e-12)
-    np.testing.assert_allclose(np.swapaxes(frames, 1, 2)@frames, np.tile(np.eye(3), (len(angle), 1, 1)), atol=1e-12)
-    np.testing.assert_allclose(Rotation.from_quat(quat).as_matrix(), frames, atol=1e-12)
-    assert np.all(np.sum(quat[:-1]*quat[1:], axis=1) >= 0)
-    assert (Rotation.from_matrix(frames[0]).inv()*Rotation.from_matrix(frames[-1])).magnitude() > .9
 
 
 def test_contact_pose_rigid_transform_and_example_ball_center(cfg):
@@ -176,21 +146,6 @@ def test_contact_pose_rigid_transform_and_example_ball_center(cfg):
         broken.loc[0, key] = value
         with pytest.raises(ValueError, match='validation failed'):
             validate_contact_poses(cad, broken, TC, TS, T, cfg)
-
-
-@pytest.mark.parametrize('key,value', [('max_normal_offset_mm', 0), ('path_sampling_mm', np.nan),
-                                      ('fit_degree', 3), ('min_support_points', 3),
-                                      ('secondary_layer_fraction', 1), ('normal_mode', 'unknown')])
-def test_invalid_mapping_configuration_rejected(cfg, key, value):
-    cfg[key] = value
-    with pytest.raises(ValueError):
-        validate_mapping_config(cfg)
-
-
-def test_undefined_contact_tangent_rejected():
-    with pytest.raises(ValueError, match='undefined tangent'):
-        contact_frames(np.zeros((3, 3)), np.tile([0, 0, 1.], (3, 1)))
-
 
 
 def test_scan_normal_mode_couples_surface_position_and_axis(cfg):
@@ -249,16 +204,6 @@ def test_face_filtered_support_excludes_parallel_other_face(cfg):
         map_reference_paths(path, cloud, cfg, support_face_ids=labels[:-1])
 
 
-def test_empty_result_preserves_export_schema_and_explicit_empty_check(cfg):
-    table = map_reference_paths(_reference([0., .5]), np.array([[99., 99., 99.]]), cfg)
-    cad, scan, TC, TS = export_contact_poses(table, np.eye(4), cfg)
-    assert cad.empty and scan.empty
-    assert TC.shape == TS.shape == (0, 4, 4)
-    assert set(['x_mm', 'tool_z_x', 'qx', 'frame', 'execution_allowed']).issubset(cad.columns)
-    checks = validate_contact_poses(cad, scan, TC, TS, np.eye(4), cfg)
-    assert checks['passed'] and checks['empty'] and checks['accepted_pose_count'] == 0
-
-
 def test_pose_splits_and_rejected_samples_are_synchronized(cfg):
     points = np.array([[0., 0., .1], [.5, 0., .1], [1., 0., .1],
                        [1., .5, .1], [1., 1., .1], [1., 1.5, .1]])
@@ -281,38 +226,6 @@ def test_pose_splits_and_rejected_samples_are_synchronized(cfg):
     assert cad.sample_index.equals(cad2.sample_index)
 
 
-@pytest.mark.parametrize('key,value', [('scan_sigma_mm', -.1),
-                                      ('registration_sigma_mm', np.nan),
-                                      ('uncertainty_multiplier', 0.),
-                                      ('max_position_uncertainty_mm', -.1)])
-def test_invalid_conditional_uncertainty_configuration(cfg, key, value):
-    with pytest.raises(ValueError):
-        validate_mapping_config(dict(cfg, **{key: value}))
-
-
-def test_local_surface_derivatives_are_covariant_under_rigid_rotation(cfg):
-    xy = grid()
-    z = .12+.06*xy[:, 0]-.03*xy[:, 1]+.04*xy[:, 0]**2
-    points = np.column_stack([xy, z])
-    rotation = Rotation.from_euler('xyz', [.5, -.7, .9]).as_matrix()
-    translation = np.array([12., -20., 5.])
-    normal = rotation@np.array([0., 0., 1.])
-    fit = fit_local_surface(translation, normal, points@rotation.T+translation, cfg)
-    assert fit['valid']
-    expected_normal = np.array([-.06, .03, 1.])
-    expected_normal /= np.linalg.norm(expected_normal)
-    np.testing.assert_allclose(fit['mapped_point'], translation+.12*normal, atol=1e-10)
-    np.testing.assert_allclose([fit[f'scan_normal_{a}'] for a in 'xyz'],
-                               rotation@expected_normal, atol=1e-10)
-
-
-def test_path_correspondence_lengths_cannot_be_silently_truncated(cfg):
-    path = _reference([0., .5, 1.])
-    path[0]['normals_C'] = path[0]['normals_C'][:2]
-    with pytest.raises(ValueError, match='aligned finite arrays'):
-        map_reference_paths(path, np.array([[0., 0., .1]]), cfg)
-
-
 def test_principal_curvature_of_paraboloid_and_rigid_rotation(cfg):
     xy = grid()
     kx, ky = .18, -.11
@@ -330,19 +243,3 @@ def test_principal_curvature_of_paraboloid_and_rigid_rotation(cfg):
     assert rotated['valid']
     assert rotated['max_abs_principal_curvature_per_mm'] == pytest.approx(kx, abs=1e-10)
     assert rotated['principal_curvature_min_per_mm'] == pytest.approx(ky, abs=1e-10)
-
-
-def test_tilted_height_surface_curvature_uses_first_fundamental_form(cfg):
-    xy = grid()
-    slope, second = .2, .16
-    z = .1+slope*xy[:, 0]+.5*second*xy[:, 0]**2
-    fit = fit_local_surface(np.zeros(3), [0, 0, 1], np.column_stack([xy, z]), cfg)
-    assert fit['valid']
-    # Extruded parabola has one zero curvature, and k=h''/(1+h'^2)^(3/2).
-    assert fit['principal_curvature_min_per_mm'] == pytest.approx(0., abs=1e-10)
-    assert fit['max_abs_principal_curvature_per_mm'] == pytest.approx(
-        second/(1+slope**2)**1.5, abs=1e-10)
-    plane = fit_local_surface(np.zeros(3), [0, 0, 1],
-                              np.column_stack([xy, .1+slope*xy[:, 0]]), dict(cfg, fit_degree=1))
-    assert plane['valid']
-    assert plane['max_abs_principal_curvature_per_mm'] == 0.

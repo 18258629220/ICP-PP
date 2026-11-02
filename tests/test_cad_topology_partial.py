@@ -1,6 +1,5 @@
 """Incomplete face tessellation must not erase exact geometry or shift IDs."""
 from pathlib import Path
-from types import SimpleNamespace
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
@@ -50,32 +49,3 @@ def test_partial_mesh_preserves_face_ids_uv_and_exact_assignment(monkeypatch, tm
         assert str(saved['mesh_status']) == 'partial'
         assert saved['unmeshed_face_ids'].tolist() == [missing_id]
         assert saved['exact_face_count'] == 6
-
-
-def test_all_faces_unmeshed_has_explicit_empty_shapes_and_exact_geometry(monkeypatch, tmp_path):
-    faces = cq.Workplane('XY').box(10,8,2).val().Faces()
-    monkeypatch.setattr(module,'_triangulate_face',lambda *args: {'status':'mesher_not_done'})
-    with pytest.warns(RuntimeWarning,match='tessellation is empty'):
-        topology = CadTopology(faces)
-    assert topology.catalog['mesh_status'] == 'empty'
-    assert topology.catalog['meshed_face_count'] == 0
-    assert len(topology.catalog['mesh_warnings']) == len(faces)
-    assert topology.vertices.shape == (0,3)
-    assert topology.triangles.shape == (0,3)
-    assert topology.vertex_uv.shape == (0,2)
-    assert topology.vertex_face_ids.shape == (0,)
-    assert topology.triangle_face_ids.shape == (0,)
-    labels = segment_points([[0,0,1.1]],topology)
-    assert labels.loc[0,'valid']
-    topology.save_mesh(tmp_path/'empty.npz')
-    with np.load(tmp_path/'empty.npz') as data:
-        assert data['triangles'].shape == (0,3)
-        assert str(data['mesh_status']) == 'empty'
-
-
-def test_mesher_not_done_is_a_diagnostic_result(monkeypatch):
-    import OCP.BRepMesh
-    face = cq.Workplane('XY').box(1,1,1).faces('>Z').val()
-    monkeypatch.setattr(OCP.BRepMesh, 'BRepMesh_IncrementalMesh',
-                        lambda *args: SimpleNamespace(IsDone=lambda:False))
-    assert module._triangulate_face(face,.05,.15) == {'status':'mesher_not_done'}

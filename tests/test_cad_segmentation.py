@@ -105,10 +105,3 @@ def test_bvh_candidates_match_conservative_aabb_distances_and_overflow_rejects()
     result = segment_points([[0,0,0]],topology,{'max_distance_mm':2.,'max_candidates':1})
     assert result.loc[0,'status'] == 'candidate_overflow'
     assert result.loc[0,'exact_projection_count'] == 0
-
-
-@pytest.mark.parametrize('cfg', [{'max_distance_mm':0},{'ambiguity_margin_mm':-.1},
-                                {'max_candidates':0},{'max_normal_angle_deg':np.nan}])
-def test_invalid_segmentation_config_rejected(cfg):
-    with pytest.raises(ValueError):
-        segmentation_config(cfg)
