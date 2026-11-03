@@ -52,8 +52,11 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
 
 | 文件 | 作用 |
 |---|---|
+| `path_details/PATH_DETAILS.html` | CAD／实测曲面并排，可选择三条代表路径或单条放大，相机同步、曲面透明度与三轴图层可调 |
+| `path_details/selected_paths_overview.png` | 选中路径在真实工件上的位置 |
+| `path_details/cad_scan_surface_comparison.png` / `P*_contact_axes_detail.png` | 三条路径的曲面对照与短连续段刀轴放大 |
 | `REAL_WORKPIECE.html` | 基坐标真实扫描、CAD、型面颜色、接触路径和刀轴，可切换图层 |
-| `real_overview.png` / `contact_axes_detail.png` | 基坐标静态总览和局部姿态 |
+| `real_overview.png` | 基坐标分割与全路径静态总览 |
 | `contact_poses_BASE.csv` | 接触点 XYZ、三轴、XYZW 四元数及 `frame=ROBOT_BASE` |
 | `contact_transforms_BASE.npz` | 与 CSV 一一对应的基坐标接触框架矩阵 |
 | `surface_field_BASE.csv` | 全部参考采样的映射结果、参考点、法向与拒绝原因；几何字段为基坐标 |
@@ -68,6 +71,27 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
 所有位姿 `execution_allowed=False`；尚未包含机器人逆解、碰撞、进退刀和速度规划。
 内部 CAD 位姿仅在 `export_cad_audit=true` 时保存为 `contact_poses_CAD_audit.csv`，
 该审核文件不能与主 CSV 中的基坐标位置或方向混合使用。
+
+## 单独改善已有结果的可视化
+
+```bash
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
+  10_visualize_surface_paths.py --run-dir output/real_base_run \
+  --output-dir output/path_visuals_v2
+```
+
+输出目录必须为空，不覆盖历史运行。默认结合有效长度、接受率和 CAD 法向变化选择三个不同
+型面上的代表路径，避免把实测法向噪声当成设计曲率。指定 `--path-id` 可改选一至三条路径。
+`--axis-length-mm` 控制箭头显示长度；三轴数值、接触点、四元数和实际偏差保持原样。
+交互图左侧为 CAD 曲面与参考位姿，右侧为同型面实测点云局部网格与导出接触位姿；
+两侧相同范围、比例和相机，鼠标悬停查看 BASE 坐标、采样号、偏移、拟合 RMS 和三轴向量。
+工具 +Z 从曲面外侧画向接触点，避免箭头被曲面遮挡；红 X、绿 Y、紫 +Z。
+
+实测显示网格只使用已归属该面的原始支持点，经物理 UV 尺度修正后做 Delaunay 三角化，
+删除三维边长超过 1.5 mm 的三角形，并在 CAD 裁剪网格 UV 中检查边中点和重心。
+UV 网格无效时退回支持点显示，不跨面补曲面。它是局部显示近似，采样检查不保证识别所有微小孔洞，
+不能当成新计算的加工曲面或准确度证据。连线按有效状态、导出段号和源采样编号保持断开。
+`visualization_manifest.json` 记录源文件哈希、代表路径、箭头尺度及绘图源码版本。
 
 ## 支撑数据和质量检查
 

@@ -44,6 +44,8 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
 
 | 文件 | 含义 |
 |---|---|
+| `path_details/PATH_DETAILS.html` | 三条代表曲线路径的 CAD／实测曲面对照，放大完整 XYZ 刀轴、读取接触位姿 |
+| `path_details/cad_scan_surface_comparison.png` / `P*_contact_axes_detail.png` | CAD／实测曲面对照图与连续局部刀轴放大图 |
 | `REAL_WORKPIECE.html` / `real_overview.png` | 在机械臂基坐标中查看真实扫描、定位后的 CAD、分割与接触路径 |
 | `contact_poses_BASE.csv` | 基坐标接触点 XYZ、刀轴三轴和 XYZW 四元数 |
 | `contact_transforms_BASE.npz` | 基坐标下的接触框架齐次矩阵，列向量约定 |
@@ -63,6 +65,18 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
 全点分割用保留 CAD 面号的网格加速，精确 STEP 抽查单独记录。
 未扫描、边界歧义与支持不足处保留未知，路径不跨缺口连接。
 ICP 残差、拟合残差和数值往返误差不等于独立测量精度，不能据此宣称 ≤0.2 mm 达标。
+
+已有运行结果可单独重绘，无需重新配准或规划：
+
+```bash
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 .venv/bin/python \
+  10_visualize_surface_paths.py --run-dir output/real_base_run \
+  --output-dir output/path_visuals_v2
+```
+
+打开新目录的 `PATH_DETAILS.html`，选择单条路径即可查看曲面和稀疏三轴。
+可重复传入 `--path-id` 指定一至三条路径，`--axis-length-mm` 只改变箭头显示长度。
+实测曲面由同型面扫描支持点局部三角化，仅作显示；原始 CSV/NPZ 和路径偏差均不改变。
 
 ## 精简与检查
 

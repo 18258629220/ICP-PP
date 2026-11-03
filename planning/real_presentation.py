@@ -216,29 +216,6 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
         ax.tick_params(labelsize=8);ax.grid(alpha=.15)
     fig.suptitle('Real workpiece in ROBOT_BASE: segmentation and contact-axis planning',fontsize=16)
     fig.savefig(dest/'real_overview.png',dpi=180,facecolor='white');plt.close(fig)
-    if poses is not None and len(poses):
-        curved=[]
-        for _, group in poses.groupby('segment_id',sort=False):
-            if len(group)<10:
-                continue
-            normal=group[[f'tool_z_{a}' for a in 'xyz']].to_numpy(float)
-            spread=float(np.max(np.degrees(np.arccos(np.clip(normal@normal[len(normal)//2],-1,1)))))
-            curved.append((spread,group))
-        group=max(curved,key=lambda item:item[0])[1] if curved else poses.iloc[:min(30,len(poses))]
-        p=group[['x_mm','y_mm','z_mm']].to_numpy(float)
-        sample=np.unique(np.linspace(0,len(p)-1,min(12,len(p))).astype(int))
-        fig=plt.figure(figsize=(10,8),layout='constrained');ax=fig.add_subplot(111,projection='3d')
-        ax.plot(*p.T,color='#142fa0',lw=2,label='Surface contact path')
-        for axis,color in [('x','#c43232'),('y','#188b44'),('z','#9b1c8c')]:
-            vectors=group[[f'tool_{axis}_{a}' for a in 'xyz']].to_numpy(float)[sample]
-            ax.quiver(*p[sample].T,*vectors.T,length=2.,normalize=True,color=color,
-                      arrow_length_ratio=.25,label=f'Tool {axis.upper()}')
-        lo,hi=p.min(0)-2.5,p.max(0)+2.5
-        for setter,a,b in zip([ax.set_xlim,ax.set_ylim,ax.set_zlim],lo,hi):setter(a,b)
-        ax.set_box_aspect(np.maximum(hi-lo,1.));ax.view_init(elev=elev,azim=azim)
-        ax.set(xlabel='BASE X / mm',ylabel='BASE Y / mm',zlabel='BASE Z / mm',
-               title='Robot-base contact frames on a curved region\nPurple +Z follows the configured toward-surface convention')
-        ax.legend(loc='upper left');fig.savefig(dest/'contact_axes_detail.png',dpi=180,facecolor='white');plt.close(fig)
     face_rows=[]
     for fid in selected:
         group=poses[poses.face_id==fid]
@@ -270,6 +247,7 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
         '- REAL_WORKPIECE.html：基坐标下旋转查看分割、已定位CAD、接触路径与刀轴。',
         '- registration_BASE.html：原始基坐标扫描保持不动，检查CAD定位叠加。',
         '- real_overview.png：基坐标下的分割与路径静态总览。',
+        '- path_details/PATH_DETAILS.html：三条代表路径的CAD/实测曲面对照，可放大查看完整刀轴；同目录含静态细节图。',
         '- scan_segmented_BASE.ply：全分辨率基坐标分割点云；XYZ、原属性和点序保留。',
         '- contact_poses_BASE.csv：基坐标接触点XYZ、刀轴三轴和XYZW四元数。',
         '- contact_transforms_BASE.npz：T_B_contact；列向量约定，前三列为刀轴X/Y/Z，末列为接触点。',
@@ -281,3 +259,6 @@ def write_real_deliverables(dest, raw, transform, topology, label_dir, poses, co
         '未指定磨头和去除深度，本次只输出接触点与刀轴几何。',
         '抽查一致性和拟合残差不是独立测量精度，不能据此认证≤0.2mm。',
         '材料侧/实际设备定位仍需验证；未生成设备可执行加工指令。', '']) )
+    if len(poses):
+        from planning.path_visualization import write_path_details
+        write_path_details(dest, dest/'path_details')
