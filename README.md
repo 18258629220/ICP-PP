@@ -28,6 +28,11 @@ python3.10 -m venv .venv
 2. `02_register_and_analyze.py`：配准和偏差分析，并保存 CAD 到基坐标的定位变换。
 3. `09_plan_surface_workflow.py`：复用同批配准，完成全点分割、主要型面覆盖与基坐标刀轴输出。
 
+仅需配准后去除远离 CAD 的背景/夹具候选点并分割型面时，使用
+`11_filter_and_segment.py --distance-mm <毫米阈值> --run-dir <新目录>`。
+它输出筛选后的 `scan_segmented_BASE.ply`、剔除点云和原始行号映射，在型面分割后停止，
+不运行路径与刀轴规划。阈值需结合实际距离分布选择，见[工件点云筛选说明](docs/WORKPIECE_FILTER.md)。
+
 已有配准只在 STEP/扫描哈希与保存矩阵一致时复用。确认坐标含义后，无需为了改输出坐标
 重新拟合一次 ICP；使用原矩阵的逆变换即可将 CAD 与路径定位到真实扫描基坐标。
 
